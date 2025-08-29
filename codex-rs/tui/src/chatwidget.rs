@@ -810,6 +810,9 @@ impl ChatWidget {
             SlashCommand::Status => {
                 self.add_status_output();
             }
+            SlashCommand::Usage => {
+                self.add_usage_output();
+            }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
@@ -1035,6 +1038,10 @@ impl ChatWidget {
             &self.total_token_usage,
             &self.session_id,
         ));
+    }
+
+    pub(crate) fn add_usage_output(&mut self) {
+        self.add_to_history(history_cell::new_usage_output(&self.config));
     }
 
     /// Open a popup to choose the model preset (model + reasoning effort).
