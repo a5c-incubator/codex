@@ -20,7 +20,7 @@ CODEX_CLI_ROOT=""
 # Until we start publishing stable GitHub releases, we have to grab the binaries
 # from the GitHub Action that created them. Update the URL below to point to the
 # appropriate workflow run:
-WORKFLOW_URL="https://github.com/openai/codex/actions/runs/16840150768" # rust-v0.20.0-alpha.2
+WORKFLOW_URL="https://github.com/a5c-incubator/codex/actions/runs/17322665068" # rust-v0.20.0-alpha.2
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
