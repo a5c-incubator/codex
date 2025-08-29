@@ -4,6 +4,8 @@ use codex_core::config::ConfigOverrides;
 use codex_login::AuthMode;
 use codex_login::CodexAuth;
 
+use codex_chatgpt::usage::get_usage as get_chatgpt_usage;
+
 #[derive(Debug, clap::Parser)]
 pub struct UsageCommand {
     #[clap(skip)]
@@ -14,19 +16,57 @@ pub async fn run_usage_command(cli_config_overrides: CliConfigOverrides) -> anyh
     let config = load_config_or_exit(cli_config_overrides);
 
     match CodexAuth::from_codex_home(&config.codex_home, config.preferred_auth_method) {
-        Ok(Some(auth)) => {
-            let plan = auth
-                .get_plan_type()
-                .unwrap_or_else(|| "unknown".to_string());
-            match auth.mode {
-                AuthMode::ApiKey | AuthMode::ChatGPT => {
-                    println!(
-                        "Usage information is currently unavailable.\nPlan: {plan}\nNote: Guardrail usage and reset times will appear here when supported."
-                    );
+        Ok(Some(auth)) => match auth.mode {
+            AuthMode::ApiKey => {
+                let plan = auth
+                    .get_plan_type()
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("Plan: {plan}");
+                println!(
+                    "Using an API key. Guardrail usage does not apply; billing is per-token.\nSee https://platform.openai.com/account/usage for detailed usage."
+                );
+                Ok(())
+            }
+            AuthMode::ChatGPT => {
+                let plan = auth
+                    .get_plan_type()
+                    .unwrap_or_else(|| "unknown".to_string());
+                match get_chatgpt_usage(&config).await {
+                    Ok(summary) => {
+                        println!("Plan: {plan}");
+                        if let Some(when) = summary.next_reset_at.as_deref() {
+                            println!("Next reset: {when}");
+                        }
+                        if let (Some(u), Some(l)) = (
+                            summary.standard_used_minutes,
+                            summary.standard_limit_minutes,
+                        ) {
+                            println!("Standard: {u} / {l} minutes used");
+                        }
+                        if let (Some(u), Some(l)) = (
+                            summary.reasoning_used_minutes,
+                            summary.reasoning_limit_minutes,
+                        ) {
+                            println!("Reasoning: {u} / {l} minutes used");
+                        }
+
+                        // If no buckets printed, fall back to a generic message.
+                        if summary.standard_used_minutes.is_none()
+                            && summary.reasoning_used_minutes.is_none()
+                        {
+                            println!("Usage data retrieved, but no bucket details available.");
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!(
+                            "Plan: {plan}\nUnable to retrieve usage from ChatGPT backend.\nReason: {e}\nUsage information is currently unavailable."
+                        );
+                        Ok(())
+                    }
                 }
             }
-            Ok(())
-        }
+        },
         Ok(None) => {
             println!("Not logged in. Usage information requires authentication.\nRun: codex login");
             Ok(())
