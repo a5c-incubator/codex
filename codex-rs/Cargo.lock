@@ -678,6 +678,7 @@ name = "codex-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "clap_complete",
  "codex-arg0",

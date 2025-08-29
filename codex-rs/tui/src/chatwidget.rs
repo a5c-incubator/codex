@@ -810,6 +810,9 @@ impl ChatWidget {
             SlashCommand::Status => {
                 self.add_status_output();
             }
+            SlashCommand::Usage => {
+                self.add_usage_output();
+            }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
@@ -1035,6 +1038,30 @@ impl ChatWidget {
             &self.total_token_usage,
             &self.session_id,
         ));
+    }
+
+    pub(crate) fn add_usage_output(&mut self) {
+        // Show a placeholder immediately, then resolve results async to keep UI responsive.
+        self.add_to_history(history_cell::new_usage_pending());
+        self.request_redraw();
+
+        let tx = self.app_event_tx.clone();
+        let codex_home = self.config.codex_home.clone();
+        let preferred = self.config.preferred_auth_method;
+        tokio::spawn(async move {
+            let result_cell = match codex_login::CodexAuth::from_codex_home(&codex_home, preferred)
+            {
+                Ok(Some(auth)) => match codex_login::usage::fetch_usage(&auth).await {
+                    Ok(info) => history_cell::new_usage_output(Ok(info)),
+                    Err(e) => history_cell::new_usage_output(Err(e.to_string())),
+                },
+                Ok(None) => history_cell::new_usage_output(Err(
+                    "Not logged in — usage data unavailable".to_string(),
+                )),
+                Err(e) => history_cell::new_usage_output(Err(format!("Failed to load auth: {e}"))),
+            };
+            tx.send(AppEvent::InsertHistoryCell(Box::new(result_cell)));
+        });
     }
 
     /// Open a popup to choose the model preset (model + reasoning effort).

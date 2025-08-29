@@ -22,6 +22,7 @@ pub enum SlashCommand {
     Status,
     Mcp,
     Logout,
+    Usage,
     Quit,
     #[cfg(debug_assertions)]
     TestApproval,
@@ -38,6 +39,7 @@ impl SlashCommand {
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Usage => "show guardrail usage and reset times",
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
@@ -65,6 +67,7 @@ impl SlashCommand {
             SlashCommand::Diff
             | SlashCommand::Mention
             | SlashCommand::Status
+            | SlashCommand::Usage
             | SlashCommand::Mcp
             | SlashCommand::Quit
             | SlashCommand::TestApproval => true,

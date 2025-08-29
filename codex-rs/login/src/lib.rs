@@ -27,6 +27,7 @@ mod auth_manager;
 mod pkce;
 mod server;
 mod token_data;
+pub mod usage;
 
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";

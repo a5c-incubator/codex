@@ -76,6 +76,9 @@ enum Subcommand {
     /// Internal: generate TypeScript protocol bindings.
     #[clap(hide = true)]
     GenerateTs(GenerateTsCommand),
+
+    /// Show current guardrail usage and reset times.
+    Usage(UsageCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -135,6 +138,12 @@ struct GenerateTsCommand {
     prettier: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+struct UsageCommand {
+    #[clap(skip)]
+    config_overrides: CliConfigOverrides,
+}
+
 fn main() -> anyhow::Result<()> {
     arg0_dispatch_or_else(|codex_linux_sandbox_exe| async move {
         cli_main(codex_linux_sandbox_exe).await?;
@@ -157,6 +166,10 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         Some(Subcommand::Exec(mut exec_cli)) => {
             prepend_config_flags(&mut exec_cli.config_overrides, cli.config_overrides);
             codex_exec::run_main(exec_cli, codex_linux_sandbox_exe).await?;
+        }
+        Some(Subcommand::Usage(mut usage_cli)) => {
+            prepend_config_flags(&mut usage_cli.config_overrides, cli.config_overrides);
+            codex_cli::usage::run_usage(usage_cli.config_overrides).await?;
         }
         Some(Subcommand::Mcp) => {
             codex_mcp_server::run_main(codex_linux_sandbox_exe, cli.config_overrides).await?;

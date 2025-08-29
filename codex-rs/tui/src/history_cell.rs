@@ -304,6 +304,73 @@ pub(crate) fn new_user_prompt(message: String) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+pub(crate) fn new_usage_pending() -> PlainHistoryCell {
+    let lines: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from("/usage".magenta()),
+        Line::from(""),
+        Line::from("Fetching usage…".dim()),
+    ];
+    PlainHistoryCell { lines }
+}
+
+pub(crate) fn new_usage_output(
+    result: Result<codex_login::usage::UsageInfo, String>,
+) -> PlainHistoryCell {
+    let mut lines: Vec<Line<'static>> = vec![Line::from(""), Line::from("/usage".magenta())];
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec!["📈 ".into(), "Guardrail Usage".bold()]));
+
+    match result {
+        Ok(info) => {
+            if let Some(plan) = info.plan {
+                if !plan.is_empty() {
+                    lines.push(Line::from(vec![
+                        "  • Plan: ".into(),
+                        title_case(&plan).into(),
+                    ]));
+                }
+            }
+            if let Some(five) = info.five_hour {
+                lines.push(Line::from(vec![
+                    "  • 5-hour: ".into(),
+                    format!("{} / {} minutes", five.used_minutes, five.limit_minutes).into(),
+                ]));
+                if let Some(reset) = five.reset_at {
+                    lines.push(Line::from(vec![
+                        "    • Resets at: ".into(),
+                        format!("{}", reset.to_rfc3339()).into(),
+                    ]));
+                }
+            } else {
+                lines.push(Line::from("  • 5-hour: unavailable"));
+            }
+            if let Some(week) = info.weekly {
+                lines.push(Line::from(vec![
+                    "  • Weekly: ".into(),
+                    format!("{} / {} minutes", week.used_minutes, week.limit_minutes).into(),
+                ]));
+                if let Some(reset) = week.reset_at {
+                    lines.push(Line::from(vec![
+                        "    • Resets at: ".into(),
+                        format!("{}", reset.to_rfc3339()).into(),
+                    ]));
+                }
+            } else {
+                lines.push(Line::from("  • Weekly: unavailable"));
+            }
+        }
+        Err(msg) => {
+            lines.push(Line::from(vec![
+                "  • ".into(),
+                format!("Usage data unavailable: {msg}").into(),
+            ]));
+        }
+    }
+
+    PlainHistoryCell { lines }
+}
+
 pub(crate) fn new_active_exec_command(
     command: Vec<String>,
     parsed: Vec<ParsedCommand>,
