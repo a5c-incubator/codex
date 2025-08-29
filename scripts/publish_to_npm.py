@@ -69,7 +69,7 @@ def main() -> int:
     download_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Download the artifact using gh
-    repo = "openai/codex"
+    repo = "a5c-incubator/codex"
     gh_cmd = [
         "gh",
         "release",
