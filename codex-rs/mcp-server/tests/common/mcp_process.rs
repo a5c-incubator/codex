@@ -126,26 +126,54 @@ impl McpProcess {
         .await?;
 
         let initialized = self.read_jsonrpc_message().await?;
-        assert_eq!(
-            JSONRPCMessage::Response(JSONRPCResponse {
-                jsonrpc: JSONRPC_VERSION.into(),
-                id: RequestId::Integer(request_id),
-                result: json!({
-                    "capabilities": {
-                        "tools": {
-                            "listChanged": true
-                        },
-                    },
-                    "serverInfo": {
-                        "name": "codex-mcp-server",
-                        "title": "Codex",
-                        "version": "0.0.0"
-                    },
-                    "protocolVersion": mcp_types::MCP_SCHEMA_VERSION
-                })
-            }),
-            initialized
-        );
+
+        // Validate structure without hard-coding the server version. We expect:
+        // - JSONRPC response with matching id
+        // - capabilities.tools.listChanged == true
+        // - serverInfo.name == "codex-mcp-server"
+        // - serverInfo.title == "Codex"
+        // - serverInfo.version is a non-empty string
+        // - protocolVersion == MCP_SCHEMA_VERSION
+        match initialized {
+            JSONRPCMessage::Response(resp) => {
+                assert_eq!(resp.jsonrpc, JSONRPC_VERSION.to_string());
+                assert_eq!(resp.id, RequestId::Integer(request_id));
+
+                let v = resp.result;
+                // protocolVersion
+                assert_eq!(
+                    v.get("protocolVersion").and_then(|s| s.as_str()),
+                    Some(mcp_types::MCP_SCHEMA_VERSION)
+                );
+
+                // capabilities.tools.listChanged == true
+                assert_eq!(
+                    v.get("capabilities")
+                        .and_then(|c| c.get("tools"))
+                        .and_then(|t| t.get("listChanged"))
+                        .and_then(|b| b.as_bool()),
+                    Some(true)
+                );
+
+                // serverInfo checks
+                let si = v.get("serverInfo").and_then(|x| x.as_object()).cloned();
+                assert!(si.is_some(), "missing serverInfo in initialize result");
+                let si = si.unwrap();
+
+                assert_eq!(
+                    si.get("name").and_then(|s| s.as_str()),
+                    Some("codex-mcp-server")
+                );
+                assert_eq!(si.get("title").and_then(|s| s.as_str()), Some("Codex"));
+
+                let version = si.get("version").and_then(|s| s.as_str());
+                assert!(
+                    version.is_some() && !version.unwrap().is_empty(),
+                    "serverInfo.version must be a non-empty string"
+                );
+            }
+            other => panic!("expected initialize to return Response, got: {other:?}"),
+        }
 
         // Send notifications/initialized to ack the response.
         self.send_jsonrpc_message(JSONRPCMessage::Notification(JSONRPCNotification {
