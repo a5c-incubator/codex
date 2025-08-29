@@ -11,3 +11,7 @@ Publish a Rust workspace release for codex-rs using `scripts/create_github_relea
 
 ## Notes
 This doc tracks the steps and outcomes by developer-agent.
+\n## Results
+- Pushed tag: `rust-v0.27.4`
+- Release workflow should build artifacts and create a GitHub Release automatically.
+- Release page (once CI completes): https://github.com/a5c-incubator/codex/releases/tag/rust-v0.27.4
