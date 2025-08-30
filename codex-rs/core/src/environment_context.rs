@@ -29,6 +29,7 @@ pub(crate) struct EnvironmentContext {
     pub sandbox_mode: Option<SandboxMode>,
     pub network_access: Option<NetworkAccess>,
     pub shell: Option<Shell>,
+    pub plan_mode: Option<bool>,
 }
 
 impl EnvironmentContext {
@@ -37,6 +38,7 @@ impl EnvironmentContext {
         approval_policy: Option<AskForApproval>,
         sandbox_policy: Option<SandboxPolicy>,
         shell: Option<Shell>,
+        plan_mode: Option<bool>,
     ) -> Self {
         Self {
             cwd,
@@ -60,6 +62,7 @@ impl EnvironmentContext {
                 None => None,
             },
             shell,
+            plan_mode,
         }
     }
 }
@@ -76,6 +79,7 @@ impl EnvironmentContext {
     ///   <sandbox_mode>...</sandbox_mode>
     ///   <network_access>...</network_access>
     ///   <shell>...</shell>
+    ///   <plan_mode>...</plan_mode>
     /// </environment_context>
     /// ```
     pub fn serialize_to_xml(self) -> String {
@@ -100,6 +104,9 @@ impl EnvironmentContext {
             && let Some(shell_name) = shell.name()
         {
             lines.push(format!("  <shell>{shell_name}</shell>"));
+        }
+        if let Some(plan_mode) = self.plan_mode {
+            lines.push(format!("  <plan_mode>{plan_mode}</plan_mode>"));
         }
         lines.push(ENVIRONMENT_CONTEXT_END.to_string());
         lines.join("\n")

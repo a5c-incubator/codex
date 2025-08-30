@@ -77,6 +77,12 @@ pub enum Op {
 
         /// Will only be honored if the model is configured to use reasoning.
         summary: ReasoningSummaryConfig,
+
+        /// Whether this turn should run with Plan Mode enabled. When true, the
+        /// agent will propose a plan first and await a decision before
+        /// executing. Defaults to the session-configured value.
+        #[serde(default)]
+        plan_mode: bool,
     },
 
     /// Override parts of the persistent turn context for subsequent turns.
@@ -109,6 +115,10 @@ pub enum Op {
         /// Updated reasoning summary preference (honored only for reasoning-capable models).
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<ReasoningSummaryConfig>,
+
+        /// Updated Plan Mode setting for subsequent turns.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plan_mode: Option<bool>,
     },
 
     /// Approve a command execution
@@ -125,6 +135,17 @@ pub enum Op {
         id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
+    },
+
+    /// Decision in response to a proposed plan.
+    PlanDecision {
+        /// The id of the submission correlated with the proposal.
+        id: String,
+        /// The user's decision.
+        decision: PlanDecision,
+        /// When editing, the updated plan to use.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edited_plan: Option<Plan>,
     },
 
     /// Append an entry to the persistent cross-session message history.
@@ -436,6 +457,9 @@ pub enum EventMsg {
 
     /// Ack the client's configure message.
     SessionConfigured(SessionConfiguredEvent),
+
+    /// The agent proposes a plan for the user to review and approve.
+    PlanProposed(PlanProposedEvent),
 
     McpToolCallBegin(McpToolCallBeginEvent),
 
@@ -839,6 +863,53 @@ pub struct SessionConfiguredEvent {
 
     /// Current number of entries in the history log.
     pub history_entry_count: usize,
+
+    /// Whether the session is in Plan Mode.
+    #[serde(default)]
+    pub plan_mode: bool,
+}
+
+/// A single step in a proposed plan.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanStep {
+    pub kind: PlanStepKind,
+    /// Short, imperative description of the step.
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Display, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum PlanStepKind {
+    Edit,
+    Command,
+    Test,
+}
+
+/// A proposed plan consisting of ordered steps plus free‑form notes.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct Plan {
+    pub steps: Vec<PlanStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanProposedEvent {
+    pub plan: Plan,
+}
+
+/// User's decision in response to a `PlanProposed` event.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Display, TS)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum PlanDecision {
+    Accept,
+    Edit,
+    Cancel,
 }
 
 /// User's decision in response to an ExecApprovalRequest.
@@ -912,12 +983,13 @@ mod tests {
                 model: "codex-mini-latest".to_string(),
                 history_log_id: 0,
                 history_entry_count: 0,
+                plan_mode: false,
             }),
         };
         let serialized = serde_json::to_string(&event).unwrap();
         assert_eq!(
             serialized,
-            r#"{"id":"1234","msg":{"type":"session_configured","session_id":"67e55044-10b1-426f-9247-bb680e5fe0c8","model":"codex-mini-latest","history_log_id":0,"history_entry_count":0}}"#
+            r#"{"id":"1234","msg":{"type":"session_configured","session_id":"67e55044-10b1-426f-9247-bb680e5fe0c8","model":"codex-mini-latest","history_log_id":0,"history_entry_count":0,"plan_mode":false}}"#
         );
     }
 }

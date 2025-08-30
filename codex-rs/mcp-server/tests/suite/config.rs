@@ -71,6 +71,7 @@ async fn get_config_toml_returns_subset() {
             ConfigProfile {
                 model: Some("gpt-4o".into()),
                 approval_policy: Some(AskForApproval::OnRequest),
+                plan_mode: None,
                 model_reasoning_effort: Some(ReasoningEffort::High),
             },
         )])),

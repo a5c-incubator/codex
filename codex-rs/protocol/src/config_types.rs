@@ -57,5 +57,9 @@ pub enum SandboxMode {
 pub struct ConfigProfile {
     pub model: Option<String>,
     pub approval_policy: Option<AskForApproval>,
+    /// When true, the agent operates in Plan Mode: it proposes a plan first
+    /// and awaits a decision (accept/edit/cancel) before execution.
+    #[serde(default)]
+    pub plan_mode: Option<bool>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
 }

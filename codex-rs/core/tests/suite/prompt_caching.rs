@@ -393,6 +393,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() {
             model: Some("o3".to_string()),
             effort: Some(ReasoningEffort::High),
             summary: Some(ReasoningSummary::Detailed),
+            plan_mode: None,
         })
         .await
         .unwrap();
@@ -521,6 +522,7 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() {
             model: "o3".to_string(),
             effort: ReasoningEffort::High,
             summary: ReasoningSummary::Detailed,
+            plan_mode: false,
         })
         .await
         .unwrap();
