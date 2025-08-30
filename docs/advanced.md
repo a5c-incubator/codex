@@ -2,7 +2,7 @@
 
 ## Non-interactive / CI mode
 
-Run Codex head-less in pipelines. Example GitHub Action step:
+Run Codex head-less in pipelines. See also: `docs/automation-exec.md` for a complete guide. Example GitHub Action step:
 
 ```yaml
 - name: Update changelog via Codex
