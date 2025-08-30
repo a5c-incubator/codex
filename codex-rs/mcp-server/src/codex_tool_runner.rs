@@ -193,6 +193,10 @@ async fn run_codex_tool_session_inner(
                         .await;
                         continue;
                     }
+                    EventMsg::PlanProposed(_) => {
+                        // Tool currently does not handle plan review; ignore.
+                        continue;
+                    }
                     EventMsg::Error(err_event) => {
                         // Return a response to conclude the tool call when the Codex session reports an error (e.g., interruption).
                         let result = json!({

@@ -249,12 +249,7 @@ pub(crate) fn new_session_info(
     event: SessionConfiguredEvent,
     is_first_event: bool,
 ) -> PlainHistoryCell {
-    let SessionConfiguredEvent {
-        model,
-        session_id: _,
-        history_log_id: _,
-        history_entry_count: _,
-    } = event;
+    let SessionConfiguredEvent { model, .. } = event;
     if is_first_event {
         let cwd_str = match relativize_to_home(&config.cwd) {
             Some(rel) if !rel.as_os_str().is_empty() => {

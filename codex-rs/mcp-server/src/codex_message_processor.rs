@@ -399,6 +399,7 @@ impl CodexMessageProcessor {
                     codex_protocol::config_types::ConfigProfile {
                         model: v.model,
                         approval_policy: v.approval_policy,
+                        plan_mode: v.plan_mode,
                         model_reasoning_effort: v.model_reasoning_effort,
                     },
                 )
@@ -539,6 +540,7 @@ impl CodexMessageProcessor {
                 model,
                 effort,
                 summary,
+                plan_mode: self.config.plan_mode,
             })
             .await;
 
@@ -798,6 +800,7 @@ fn derive_config_from_params(
         base_instructions,
         include_plan_tool,
         include_apply_patch_tool,
+        plan_mode: None,
         include_view_image_tool: None,
         disable_response_storage: None,
         show_raw_agent_reasoning: None,

@@ -15,6 +15,8 @@ pub struct ConfigProfile {
     /// [`ModelProviderInfo`] to use.
     pub model_provider: Option<String>,
     pub approval_policy: Option<AskForApproval>,
+    /// When true, the agent operates in Plan Mode.
+    pub plan_mode: Option<bool>,
     pub disable_response_storage: Option<bool>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,

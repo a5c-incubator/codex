@@ -185,6 +185,10 @@ pub struct Config {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: bool,
+
+    /// When true, the agent operates in Plan Mode, proposing a plan first and
+    /// awaiting a decision before execution.
+    pub plan_mode: bool,
 }
 
 impl Config {
@@ -497,6 +501,9 @@ pub struct ConfigToml {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: Option<bool>,
+
+    /// Top-level Plan Mode toggle. Defaults to false when omitted.
+    pub plan_mode: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -605,6 +612,7 @@ pub struct ConfigOverrides {
     pub disable_response_storage: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
+    pub plan_mode: Option<bool>,
 }
 
 impl Config {
@@ -633,6 +641,7 @@ impl Config {
             disable_response_storage,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
+            plan_mode: _override_plan_mode,
         } = overrides;
 
         let config_profile = match config_profile_key.as_ref().or(cfg.profile.as_ref()) {
@@ -807,6 +816,11 @@ impl Config {
                 .unwrap_or(false),
             include_view_image_tool,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
+            plan_mode: overrides
+                .plan_mode
+                .or(config_profile.plan_mode)
+                .or(cfg.plan_mode)
+                .unwrap_or(false),
         };
         Ok(config)
     }
@@ -1177,6 +1191,7 @@ disable_response_storage = true
                 use_experimental_streamable_shell_tool: false,
                 include_view_image_tool: true,
                 disable_paste_burst: false,
+                plan_mode: false,
             },
             o3_profile_config
         );
@@ -1235,6 +1250,7 @@ disable_response_storage = true
             use_experimental_streamable_shell_tool: false,
             include_view_image_tool: true,
             disable_paste_burst: false,
+            plan_mode: false,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -1308,6 +1324,7 @@ disable_response_storage = true
             use_experimental_streamable_shell_tool: false,
             include_view_image_tool: true,
             disable_paste_burst: false,
+            plan_mode: false,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);

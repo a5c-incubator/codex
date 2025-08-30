@@ -260,6 +260,7 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 history_log_id: 1,
                 history_entry_count: 1000,
+                plan_mode: false,
             }),
         };
 
@@ -289,6 +290,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             history_log_id: 1,
             history_entry_count: 1000,
+            plan_mode: false,
         };
         let event = Event {
             id: "1".to_string(),
@@ -317,6 +319,7 @@ mod tests {
                 "model": session_configured_event.model,
                 "history_log_id": session_configured_event.history_log_id,
                 "history_entry_count": session_configured_event.history_entry_count,
+                "plan_mode": session_configured_event.plan_mode,
                 "type": "session_configured",
             }
         });

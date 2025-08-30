@@ -1008,6 +1008,9 @@ impl ChatWidget {
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
+            codex_core::protocol::EventMsg::PlanProposed(_) => {
+                // TODO: Render plan proposal in UI overlay (future work).
+            }
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
                 self.on_background_event(message)
@@ -1098,6 +1101,7 @@ impl ChatWidget {
                     model: Some(model_slug.clone()),
                     effort: Some(effort),
                     summary: None,
+                    plan_mode: None,
                 }));
                 tx.send(AppEvent::UpdateModel(model_slug.clone()));
                 tx.send(AppEvent::UpdateReasoningEffort(effort));
@@ -1139,6 +1143,7 @@ impl ChatWidget {
                     model: None,
                     effort: None,
                     summary: None,
+                    plan_mode: None,
                 }));
                 tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
                 tx.send(AppEvent::UpdateSandboxPolicy(sandbox.clone()));

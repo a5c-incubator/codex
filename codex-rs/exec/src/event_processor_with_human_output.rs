@@ -508,10 +508,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             }
             EventMsg::SessionConfigured(session_configured_event) => {
                 let SessionConfiguredEvent {
-                    session_id,
-                    model,
-                    history_log_id: _,
-                    history_entry_count: _,
+                    session_id, model, ..
                 } = session_configured_event;
 
                 ts_println!(
@@ -528,6 +525,15 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 let UpdatePlanArgs { explanation, plan } = plan_update_event;
                 ts_println!(self, "explanation: {explanation:?}");
                 ts_println!(self, "plan: {plan:?}");
+            }
+            EventMsg::PlanProposed(proposed) => {
+                ts_println!(self, "{}", "plan proposed:".style(self.magenta));
+                for (i, step) in proposed.plan.steps.iter().enumerate() {
+                    ts_println!(self, "  {}. [{}] {}", i + 1, step.kind, step.description);
+                }
+                if let Some(notes) = &proposed.plan.notes {
+                    ts_println!(self, "notes: {}", notes);
+                }
             }
             EventMsg::GetHistoryEntryResponse(_) => {
                 // Currently ignored in exec output.

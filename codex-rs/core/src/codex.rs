@@ -556,6 +556,7 @@ impl Session {
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             Some(sess.user_shell.clone()),
+            if config.plan_mode { Some(true) } else { None },
         )));
         sess.record_conversation_items(&conversation_items).await;
 
@@ -567,6 +568,7 @@ impl Session {
                 model,
                 history_log_id,
                 history_entry_count,
+                plan_mode: config.plan_mode,
             }),
         })
         .chain(post_session_configured_error_events.into_iter());
@@ -1070,6 +1072,7 @@ async fn submission_loop(
                 model,
                 effort,
                 summary,
+                plan_mode,
             } => {
                 // Recalculate the persistent turn context with provided overrides.
                 let prev = Arc::clone(&turn_context);
@@ -1138,13 +1141,19 @@ async fn submission_loop(
 
                 // Install the new persistent context for subsequent tasks/turns.
                 turn_context = Arc::new(new_turn_context);
-                if cwd.is_some() || approval_policy.is_some() || sandbox_policy.is_some() {
+                if cwd.is_some()
+                    || approval_policy.is_some()
+                    || sandbox_policy.is_some()
+                    || plan_mode.is_some()
+                {
                     sess.record_conversation_items(&[ResponseItem::from(EnvironmentContext::new(
                         cwd,
                         approval_policy,
                         sandbox_policy,
                         // Shell is not configurable from turn to turn
                         None,
+                        // Allow per-turn override of plan mode via context
+                        plan_mode,
                     ))])
                     .await;
                 }
@@ -1166,6 +1175,7 @@ async fn submission_loop(
                 model,
                 effort,
                 summary,
+                plan_mode: _,
             } => {
                 // attempt to inject input into current task
                 if let Err(items) = sess.inject_input(items) {
