@@ -83,6 +83,7 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
   - [Login on a "Headless" machine](./docs/authentication.md#connecting-on-a-headless-machine)
 - [**Advanced**](./docs/advanced.md)
   - [Non-interactive / CI mode](./docs/advanced.md#non-interactive--ci-mode)
+  - [Automation with codex exec](./docs/automation-exec.md)
   - [Tracing / verbose logging](./docs/advanced.md#tracing--verbose-logging)
   - [Model Context Protocol (MCP)](./docs/advanced.md#model-context-protocol-mcp)
 - [**Zero data retention (ZDR)**](./docs/zdr.md)
@@ -99,4 +100,3 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
 ## License
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
-
