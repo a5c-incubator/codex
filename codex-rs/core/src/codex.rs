@@ -613,8 +613,12 @@ impl Session {
         reason: Option<String>,
     ) -> oneshot::Receiver<ReviewDecision> {
         let (tx_approve, rx_approve) = oneshot::channel();
+        {
+            let mut state = self.state.lock_unchecked();
+            state.pending_approvals.insert(sub_id.clone(), tx_approve);
+        }
         let event = Event {
-            id: sub_id.clone(),
+            id: sub_id,
             msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
                 call_id,
                 command,
@@ -623,10 +627,6 @@ impl Session {
             }),
         };
         let _ = self.tx_event.send(event).await;
-        {
-            let mut state = self.state.lock_unchecked();
-            state.pending_approvals.insert(sub_id, tx_approve);
-        }
         rx_approve
     }
 
@@ -639,8 +639,12 @@ impl Session {
         grant_root: Option<PathBuf>,
     ) -> oneshot::Receiver<ReviewDecision> {
         let (tx_approve, rx_approve) = oneshot::channel();
+        {
+            let mut state = self.state.lock_unchecked();
+            state.pending_approvals.insert(sub_id.clone(), tx_approve);
+        }
         let event = Event {
-            id: sub_id.clone(),
+            id: sub_id,
             msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                 call_id,
                 changes: convert_apply_patch_to_protocol(action),
@@ -649,10 +653,6 @@ impl Session {
             }),
         };
         let _ = self.tx_event.send(event).await;
-        {
-            let mut state = self.state.lock_unchecked();
-            state.pending_approvals.insert(sub_id, tx_approve);
-        }
         rx_approve
     }
 
