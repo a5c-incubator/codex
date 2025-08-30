@@ -23,6 +23,4 @@ remote_agents:
         alias: recruiter-agent
       - uri: https://raw.githubusercontent.com/a5c-ai/registry/main/agents/development/product-optimizer-agent.agent.md
         alias: product-optimizer-agent
-      - uri: https://raw.githubusercontent.com/a5c-ai/registry/main/agents/development/reviver-agent.agent.md
-        alias: reviver-agent
     groups: {}
