@@ -41,6 +41,8 @@ use codex_core::protocol::ListSkillsResponseEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::SkillErrorInfo;
+use codex_core::protocol::SubagentOverride;
+use codex_core::protocol::SubagentOverrideOrigin;
 use codex_core::protocol::TokenUsage;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
@@ -342,6 +344,7 @@ impl App {
         initial_images: Vec<PathBuf>,
         resume_selection: ResumeSelection,
         feedback: codex_feedback::CodexFeedback,
+        initial_subagent: Option<String>,
         is_first_run: bool,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
@@ -441,6 +444,17 @@ impl App {
             suppress_shutdown_complete: false,
             skip_world_writable_scan_once: false,
         };
+
+        if let Some(agent_id) = initial_subagent {
+            app.chat_widget
+                .request_subagent_override(SubagentOverride::Activate {
+                    id: agent_id.clone(),
+                    resume: None,
+                    origin: Some(SubagentOverrideOrigin::CliFlag),
+                });
+            app.chat_widget
+                .add_info_message(format!("Activating subagent `{agent_id}`"), None);
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -902,6 +916,7 @@ impl App {
                                         model: None,
                                         effort: None,
                                         summary: None,
+                                        subagent: None,
                                     },
                                 ));
                                 self.app_event_tx

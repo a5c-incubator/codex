@@ -1,0 +1,21 @@
+%% Claude-compatible subagent data flow
+flowchart TD
+    subgraph DiscoveryPriority["Discovery priority + watch"]
+        P["Project .claude/agents"] -->|highest| Loader["codex-config::ManifestLoader"]
+        CLI["CLI --agents JSON"] -->|override| Loader
+        U["User ~/.claude/agents"] -->|fallback| Loader
+        Plugin["Plugin agents/ manifests"] -->|cache| Loader
+        LoaderWatch["notify watcher"] --> CLIList["codex agents list / TUI panel"]
+    end
+
+    Loader --> Registry["codex-core::AgentRegistry\n(+ built-in manifests)"]
+    Registry --> CLIList
+    Registry --> RegisterAPI["ModelClient::register_agents\n(Claude register_subagents)"]
+    RegisterAPI --> ClaudeAPI["Claude API\nx-openai-subagent wiring"]
+    Registry --> SessionBuilder["codex-core::SessionBuilder\nSessionSource::SubAgent"]
+    SessionBuilder --> Services["SessionServices\n+ AgentRuntimeProfile"]
+    Services -->|tool scope + approvals| Orchestrator["ToolOrchestrator\nhook wrapper"]
+    Orchestrator --> ModelClient["ModelClient::stream"]
+    ModelClient --> Transcript["TranscriptStore\nagent-{id}.jsonl"]
+    Transcript --> Resume["Resume index + tokens"]
+    Resume --> Registry

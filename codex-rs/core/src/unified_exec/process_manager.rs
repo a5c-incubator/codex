@@ -522,8 +522,8 @@ impl UnifiedExecProcessManager {
             exec_approval_requirement,
         );
         let tool_ctx = ToolCtx {
-            session: context.session.as_ref(),
-            turn: context.turn.as_ref(),
+            session: Arc::clone(&context.session),
+            turn: Arc::clone(&context.turn),
             call_id: context.call_id.clone(),
             tool_name: "exec_command".to_string(),
         };

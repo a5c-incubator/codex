@@ -166,6 +166,7 @@ impl CodexToolCallParam {
             base_instructions,
             developer_instructions,
             compact_prompt,
+            subagent_discovery_overrides: None,
             ..Default::default()
         };
 

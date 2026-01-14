@@ -403,6 +403,9 @@ pub struct SendUserTurnParams {
     pub summary: ReasoningSummary,
     /// Optional JSON Schema used to constrain the final assistant message for this turn.
     pub output_schema: Option<serde_json::Value>,
+    /// Activate the specified Claude-compatible subagent before sending the turn.
+    #[serde(default)]
+    pub subagent: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

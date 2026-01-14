@@ -3,6 +3,9 @@ use clap::ValueEnum;
 use codex_common::CliConfigOverrides;
 use std::path::PathBuf;
 
+use crate::subagent_args::PluginDirArg;
+use crate::subagent_args::parse_plugin_dir;
+
 #[derive(Parser, Debug)]
 #[command(version)]
 pub struct Cli {
@@ -89,6 +92,23 @@ pub struct Cli {
     )]
     pub json: bool,
 
+    /// Activate a Claude-compatible subagent (see `codex agents list`) for this run.
+    #[arg(long = "use-subagent", value_name = "AGENT_ID")]
+    pub use_subagent: Option<String>,
+
+    /// Provide an inline CLI manifest JSON payload (repeatable).
+    /// Honors docs/subagents/architecture.md priority (project > CLI > user > plugin).
+    #[arg(long = "cli-manifest", value_name = "JSON")]
+    pub cli_manifest: Vec<String>,
+
+    /// Provide a path to a CLI manifest JSON payload (repeatable).
+    #[arg(long = "cli-manifest-file", value_name = "PATH")]
+    pub cli_manifest_file: Vec<PathBuf>,
+
+    /// Add a plugin-provided manifest directory (format: plugin_id=path).
+    #[arg(long = "plugin", value_name = "PLUGIN_ID=PATH", value_parser = parse_plugin_dir)]
+    pub plugin_dirs: Vec<PluginDirArg>,
+
     /// Specifies file where the last message from the agent should be written.
     #[arg(long = "output-last-message", short = 'o', value_name = "FILE")]
     pub last_message_file: Option<PathBuf>,
@@ -132,6 +152,18 @@ pub struct ResumeArgs {
     /// Prompt to send after resuming the session. If `-` is used, read from stdin.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
+
+    /// Resume token emitted when the agent last stopped (string form).
+    #[arg(
+        long = "agent-resume-token",
+        value_name = "TOKEN",
+        conflicts_with = "agent_resume_token_file"
+    )]
+    pub agent_resume_token: Option<String>,
+
+    /// Path to a resume token emitted by the agent.
+    #[arg(long = "agent-resume-token-file", value_name = "FILE")]
+    pub agent_resume_token_file: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]

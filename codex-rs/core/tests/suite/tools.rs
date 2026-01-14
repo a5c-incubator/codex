@@ -378,11 +378,9 @@ async fn shell_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
     )
     .await?;
 
-    let timeout_item = second_mock.single_request().function_call_output(call_id);
-
-    let output_str = timeout_item
-        .get("output")
-        .and_then(Value::as_str)
+    let output_str = second_mock
+        .single_request()
+        .function_call_output_text(call_id)
         .expect("timeout output string");
 
     // The exec path can report a timeout in two ways depending on timing:
@@ -469,11 +467,9 @@ time.sleep(60)
             SandboxPolicy::DangerFullAccess,
         )
         .await?;
-        let timeout_item = second_mock.single_request().function_call_output(call_id);
-        timeout_item
-            .get("output")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        second_mock
+            .single_request()
+            .function_call_output_text(call_id)
             .context("timeout output string")
     })
     .await
@@ -556,11 +552,9 @@ async fn shell_spawn_failure_truncates_exec_error() -> Result<()> {
     )
     .await?;
 
-    let failure_item = second_mock.single_request().function_call_output(call_id);
-
-    let output = failure_item
-        .get("output")
-        .and_then(Value::as_str)
+    let output = second_mock
+        .single_request()
+        .function_call_output_text(call_id)
         .expect("spawn failure output string");
 
     let spawn_error_pattern = r#"(?s)^Exit code: -?\d+

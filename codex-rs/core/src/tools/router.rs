@@ -15,6 +15,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ShellToolCallParams;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -28,17 +29,29 @@ pub struct ToolCall {
 pub struct ToolRouter {
     registry: ToolRegistry,
     specs: Vec<ConfiguredToolSpec>,
+    allowed_tools: Option<HashSet<String>>,
 }
 
 impl ToolRouter {
     pub fn from_config(
         config: &ToolsConfig,
         mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
+        allowed_tools: Option<&[String]>,
     ) -> Self {
         let builder = build_specs(config, mcp_tools);
-        let (specs, registry) = builder.build();
+        let (mut specs, registry) = builder.build();
+        let allowed_filter =
+            allowed_tools.map(|names| names.iter().cloned().collect::<HashSet<_>>());
 
-        Self { registry, specs }
+        if let Some(filter) = allowed_filter.as_ref() {
+            specs.retain(|config| filter.contains(config.spec.name()));
+        }
+
+        Self {
+            registry,
+            specs,
+            allowed_tools: allowed_filter,
+        }
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -139,8 +152,20 @@ impl ToolRouter {
             call_id,
             payload,
         } = call;
-        let payload_outputs_custom = matches!(payload, ToolPayload::Custom { .. });
+        let payload_outputs_custom = matches!(&payload, ToolPayload::Custom { .. });
         let failure_call_id = call_id.clone();
+        if let Some(filter) = self.allowed_tools.as_ref()
+            && !filter.contains(tool_name.as_str())
+        {
+            let err = FunctionCallError::RespondToModel(format!(
+                "tool {tool_name} is not allowed for the active subagent"
+            ));
+            return Ok(Self::failure_response(
+                failure_call_id,
+                payload_outputs_custom,
+                err,
+            ));
+        }
 
         let invocation = ToolInvocation {
             session,
@@ -183,5 +208,157 @@ impl ToolRouter {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client_common::tools::FreeformTool;
+    use crate::client_common::tools::ResponsesApiTool;
+    use crate::codex::make_session_and_context;
+    use crate::tools::context::ToolInvocation;
+    use crate::tools::context::ToolOutput;
+    use crate::tools::registry::ToolHandler;
+    use crate::tools::registry::ToolKind;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use async_trait::async_trait;
+    use codex_protocol::openai_models::ConfigShellToolType;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Mutex;
+
+    fn tool_spec_name(spec: &ToolSpec) -> String {
+        match spec {
+            ToolSpec::Function(ResponsesApiTool { name, .. }) => name.clone(),
+            ToolSpec::LocalShell {} => "local_shell".to_string(),
+            ToolSpec::WebSearch { .. } => "web_search".to_string(),
+            ToolSpec::Freeform(FreeformTool { name, .. }) => name.clone(),
+        }
+    }
+
+    fn minimal_tools_config() -> ToolsConfig {
+        ToolsConfig {
+            shell_type: ConfigShellToolType::Disabled,
+            apply_patch_tool_type: None,
+            web_search_request: false,
+            web_search_cached: false,
+            experimental_supported_tools: vec![],
+        }
+    }
+
+    #[test]
+    fn specs_respect_allow_list() {
+        let config = minimal_tools_config();
+        let allowed = vec!["list_mcp_resources".to_string()];
+        let router = ToolRouter::from_config(&config, None, Some(&allowed));
+        let names = router
+            .specs()
+            .into_iter()
+            .map(|spec| tool_spec_name(&spec))
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["list_mcp_resources".to_string()]);
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordingHandler {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ToolHandler for RecordingHandler {
+        fn kind(&self) -> ToolKind {
+            ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+        ) -> Result<ToolOutput, FunctionCallError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput::Function {
+                content: "ok".to_string(),
+                content_items: None,
+                success: Some(true),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_blocks_disallowed_tools() {
+        let (session, turn_context) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tracker = Arc::new(Mutex::new(TurnDiffTracker::default()));
+        let handler = Arc::new(RecordingHandler::new());
+
+        let mut handlers: HashMap<String, Arc<dyn ToolHandler>> = HashMap::new();
+        handlers.insert("allowed".to_string(), handler.clone());
+        handlers.insert("blocked".to_string(), handler.clone());
+
+        let router = ToolRouter {
+            registry: ToolRegistry::new(handlers),
+            specs: Vec::new(),
+            allowed_tools: Some(HashSet::from(["allowed".to_string()])),
+        };
+
+        let allowed_call = ToolCall {
+            tool_name: "allowed".to_string(),
+            call_id: "allowed-call".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        };
+
+        router
+            .dispatch_tool_call(
+                Arc::clone(&session),
+                Arc::clone(&turn_context),
+                Arc::clone(&tracker),
+                allowed_call,
+            )
+            .await
+            .expect("allowed tool should run");
+        assert_eq!(handler.call_count(), 1);
+
+        let blocked_call = ToolCall {
+            tool_name: "blocked".to_string(),
+            call_id: "blocked-call".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        };
+
+        let response = router
+            .dispatch_tool_call(session, turn_context, tracker, blocked_call)
+            .await
+            .expect("blocked tool should emit a failure response");
+
+        match response {
+            ResponseInputItem::FunctionCallOutput { output, .. } => {
+                assert_eq!(
+                    output.content,
+                    "tool blocked is not allowed for the active subagent"
+                );
+                assert_eq!(output.success, Some(false));
+            }
+            other => panic!("unexpected response variant: {other:?}"),
+        }
+        assert_eq!(handler.call_count(), 1);
     }
 }

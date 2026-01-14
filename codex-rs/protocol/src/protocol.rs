@@ -34,6 +34,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_with::serde_as;
+use strum_macros::AsRefStr;
 use strum_macros::Display;
 use tracing::error;
 use ts_rs::TS;
@@ -142,6 +143,10 @@ pub enum Op {
         /// Updated reasoning summary preference (honored only for reasoning-capable models).
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<ReasoningSummaryConfig>,
+
+        /// Activate or clear a manifest-defined subagent runtime.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentOverride>,
     },
 
     /// Approve a command execution
@@ -657,6 +662,9 @@ pub enum EventMsg {
 
     /// Notification that skill data may have been updated and clients may want to reload.
     SkillsUpdateAvailable,
+
+    /// Lifecycle notification for Claude-compatible subagents.
+    SubagentLifecycle(SubagentLifecycleEvent),
 
     PlanUpdate(UpdatePlanArgs),
 
@@ -1260,7 +1268,49 @@ pub enum SessionSource {
 pub enum SubAgentSource {
     Review,
     Compact,
+    GeneralPurpose,
+    Plan,
+    Explore,
     Other(String),
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubagentOverrideOrigin {
+    CliFlag,
+    ExecFlag,
+    SlashCommand,
+    DaemonApi,
+    ResumeReplay,
+    System,
+    #[serde(other)]
+    Unknown,
+}
+
+/// User-provided override for activating or clearing a subagent runtime.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubagentOverride {
+    /// Activate the manifest identified by `id`.
+    Activate {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume: Option<SubagentResume>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: Option<SubagentOverrideOrigin>,
+    },
+    /// Clear any currently active subagent runtime.
+    Clear {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: Option<SubagentOverrideOrigin>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct SubagentResume {
+    pub token: String,
 }
 
 impl fmt::Display for SessionSource {
@@ -1281,8 +1331,26 @@ impl fmt::Display for SubAgentSource {
         match self {
             SubAgentSource::Review => f.write_str("review"),
             SubAgentSource::Compact => f.write_str("compact"),
+            SubAgentSource::GeneralPurpose => f.write_str("general_purpose"),
+            SubAgentSource::Plan => f.write_str("plan"),
+            SubAgentSource::Explore => f.write_str("explore"),
             SubAgentSource::Other(other) => f.write_str(other),
         }
+    }
+}
+
+impl fmt::Display for SubagentOverrideOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            SubagentOverrideOrigin::CliFlag => "cli_flag",
+            SubagentOverrideOrigin::ExecFlag => "exec_flag",
+            SubagentOverrideOrigin::SlashCommand => "slash_command",
+            SubagentOverrideOrigin::DaemonApi => "daemon_api",
+            SubagentOverrideOrigin::ResumeReplay => "resume_replay",
+            SubagentOverrideOrigin::System => "system",
+            SubagentOverrideOrigin::Unknown => "unknown",
+        };
+        f.write_str(label)
     }
 }
 
@@ -1370,6 +1438,49 @@ pub struct TurnContextItem {
     pub final_output_json_schema: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation_policy: Option<TruncationPolicy>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
+pub struct SubagentLifecycleEvent {
+    pub thread_id: ThreadId,
+    pub call_id: String,
+    pub phase: SubagentLifecyclePhase,
+    pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_source: Option<SessionSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_scope: Option<SubagentToolScope>,
+    pub approval_policy: AskForApproval,
+    pub sandbox_policy: SandboxPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, AsRefStr)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentLifecyclePhase {
+    Activated,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SubagentToolScope {
+    pub mode: SubagentToolScopeMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentToolScopeMode {
+    Inherit,
+    Restricted,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

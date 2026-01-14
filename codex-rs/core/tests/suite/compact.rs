@@ -1976,13 +1976,11 @@ async fn auto_compact_triggers_after_function_call_over_95_percent_usage() {
         "first request should include the user message that triggers the function call"
     );
 
-    let function_call_output = follow_up_mock
+    let (output_text, _) = follow_up_mock
         .single_request()
-        .function_call_output(DUMMY_CALL_ID);
-    let output_text = function_call_output
-        .get("output")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
+        .function_call_output_content_and_success(DUMMY_CALL_ID)
+        .expect("function call output");
+    let output_text = output_text.expect("function call output text");
     assert!(
         output_text.contains(DUMMY_FUNCTION_NAME),
         "function call output should be sent before auto compact"

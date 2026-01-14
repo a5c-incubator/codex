@@ -759,9 +759,16 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
                         && item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
                 })
             })
-            .and_then(|item| item.get("output").and_then(serde_json::Value::as_str))
-            .expect("function_call_output output string")
-            .to_string()
+            .and_then(|item| item.get("output"))
+            .and_then(|output| match output {
+                serde_json::Value::String(text) => Some(text.to_string()),
+                serde_json::Value::Object(obj) => obj
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .expect("function_call_output output text")
     }
 
     struct DynamicApplyFromRead {

@@ -18,6 +18,9 @@ use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
 use codex_core::protocol::SessionConfiguredEvent;
 use codex_core::protocol::StreamErrorEvent;
+use codex_core::protocol::SubagentLifecycleEvent;
+use codex_core::protocol::SubagentLifecyclePhase;
+use codex_core::protocol::SubagentToolScopeMode;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TurnAbortReason;
 use codex_core::protocol::TurnDiffEvent;
@@ -121,6 +124,58 @@ macro_rules! ts_msg {
     ($self:ident, $($arg:tt)*) => {{
         eprintln!($($arg)*);
     }};
+}
+
+impl EventProcessorWithHumanOutput {
+    fn on_subagent_lifecycle(&mut self, event: SubagentLifecycleEvent) {
+        match event.phase {
+            SubagentLifecyclePhase::Activated => {
+                let display_name = event
+                    .agent_name
+                    .as_deref()
+                    .unwrap_or(event.agent_id.as_str())
+                    .to_string();
+                let model = event
+                    .model
+                    .as_deref()
+                    .map(|m| format!("model: {m}"))
+                    .unwrap_or_else(|| "model: session default".to_string());
+                let scope = summarize_tool_scope(event.tool_scope.as_ref());
+                let details = format!("{model}; {scope}");
+                ts_msg!(
+                    self,
+                    "{} {} ({}) - {}",
+                    "subagent active:".style(self.magenta).style(self.bold),
+                    display_name.cyan().bold(),
+                    event.agent_id.as_str().dimmed(),
+                    details
+                );
+                ts_msg!(
+                    self,
+                    "{}",
+                    format!(
+                        "Tip: future runs can pass --use-subagent {} or run `codex agents list` to inspect manifests.",
+                        event.agent_id
+                    )
+                    .dimmed()
+                );
+            }
+            SubagentLifecyclePhase::Stopped => {
+                let display_name = event
+                    .agent_name
+                    .as_deref()
+                    .unwrap_or(event.agent_id.as_str())
+                    .to_string();
+                ts_msg!(
+                    self,
+                    "{} {} ({})",
+                    "subagent cleared:".style(self.magenta),
+                    display_name.cyan(),
+                    event.agent_id.as_str().dimmed()
+                );
+            }
+        }
+    }
 }
 
 impl EventProcessor for EventProcessorWithHumanOutput {
@@ -571,6 +626,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::ContextCompacted(_) => {
                 ts_msg!(self, "context compacted");
             }
+            EventMsg::SubagentLifecycle(event) => self.on_subagent_lifecycle(event),
             EventMsg::ShutdownComplete => return CodexStatus::Shutdown,
             EventMsg::WebSearchBegin(_)
             | EventMsg::ExecApprovalRequest(_)
@@ -657,5 +713,21 @@ fn format_mcp_invocation(invocation: &McpInvocation) -> String {
         format!("{fq_tool_name}()")
     } else {
         format!("{fq_tool_name}({args_str})")
+    }
+}
+
+fn summarize_tool_scope(scope: Option<&codex_core::protocol::SubagentToolScope>) -> String {
+    let Some(scope) = scope else {
+        return "tools: inherit parent session".to_string();
+    };
+    match scope.mode {
+        SubagentToolScopeMode::Inherit => "tools: inherit parent session".to_string(),
+        SubagentToolScopeMode::Restricted => {
+            if scope.tools.is_empty() {
+                "tools: restricted (no tools configured)".to_string()
+            } else {
+                format!("tools: restricted to {}", scope.tools.join(", "))
+            }
+        }
     }
 }

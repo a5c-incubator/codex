@@ -1,0 +1,26 @@
+---
+source: subagent/tests/loader_snapshots.rs
+expression: summary
+---
+[
+  [
+    "alpha",
+    "project",
+    "project"
+  ],
+  [
+    "delta",
+    "cli",
+    "cli"
+  ],
+  [
+    "beta",
+    "user",
+    "user"
+  ],
+  [
+    "gamma",
+    "plugin",
+    "plugin: demo-plugin"
+  ]
+]

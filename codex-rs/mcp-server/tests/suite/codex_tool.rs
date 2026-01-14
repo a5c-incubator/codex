@@ -20,6 +20,7 @@ use mcp_types::JSONRPCResponse;
 use mcp_types::ModelContextProtocolRequest;
 use mcp_types::RequestId;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -377,8 +378,15 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     );
 
     let requests = server.received_requests().await.unwrap();
-    let request = requests[0].body_json::<serde_json::Value>()?;
-    let instructions = request["messages"][0]["content"].as_str().unwrap();
+    #[expect(clippy::expect_used)]
+    let request = requests
+        .iter()
+        .find(|req| req.url.path() == "/v1/chat/completions")
+        .expect("chat completions request")
+        .body_json::<serde_json::Value>()?;
+    #[expect(clippy::expect_used)]
+    let instructions =
+        first_text_content(&request["messages"][0]["content"]).expect("system instructions text");
     assert!(instructions.starts_with("You are a helpful assistant."));
 
     let developer_msg = request["messages"]
@@ -389,10 +397,11 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
                 .find(|msg| msg.get("role").and_then(|role| role.as_str()) == Some("developer"))
         })
         .unwrap();
+    #[expect(clippy::expect_used)]
     let developer_content = developer_msg
         .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap();
+        .and_then(first_text_content)
+        .expect("developer instructions text");
     assert!(
         !developer_content.contains('<'),
         "expected developer instructions without XML tags, got `{developer_content}`"
@@ -400,6 +409,17 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     assert_eq!(developer_content, "Foreshadow upcoming tool calls.");
 
     Ok(())
+}
+
+fn first_text_content(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.to_string()),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| item.get("text").and_then(Value::as_str).map(str::to_string)),
+        Value::Object(obj) => obj.get("text").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
 }
 
 fn create_expected_patch_approval_elicitation_request(

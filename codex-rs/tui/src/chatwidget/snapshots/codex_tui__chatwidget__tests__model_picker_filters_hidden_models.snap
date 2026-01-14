@@ -1,8 +1,14 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 1989
 expression: popup
 ---
+Active agent: Default session (session)
+Model: test-visible-model | Tools: inherit parent session
+Switch agents with ":use-agent <id>" or restart with "--use-subagent <id>" (see
+`codex agents list`).
+Inspect transcripts + resume tokens with `codex agents resume-status`.
+
+
   Select Model and Effort
   Access legacy models by running codex -m <model_name> or in your config.toml
 

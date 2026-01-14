@@ -6,6 +6,7 @@ use mcp_types::ContentBlock;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::ser::SerializeStruct;
 use serde::ser::Serializer;
 use ts_rs::TS;
 
@@ -415,6 +416,19 @@ impl Serialize for FunctionCallOutputPayload {
     where
         S: Serializer,
     {
+        if let Some(false) = self.success {
+            let mut state = serializer.serialize_struct(
+                "FunctionCallOutputPayload",
+                if self.content_items.is_some() { 3 } else { 2 },
+            )?;
+            state.serialize_field("content", &self.content)?;
+            state.serialize_field("success", &false)?;
+            if let Some(items) = &self.content_items {
+                state.serialize_field("content_items", items)?;
+            }
+            return state.end();
+        }
+
         if let Some(items) = &self.content_items {
             items.serialize(serializer)
         } else {
@@ -554,6 +568,7 @@ mod tests {
     use mcp_types::ImageContent;
     use mcp_types::TextContent;
     use pretty_assertions::assert_eq;
+    use serde_json::Value;
     use tempfile::tempdir;
 
     #[test]
@@ -575,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_failure_as_string() -> Result<()> {
+    fn serializes_failure_as_object() -> Result<()> {
         let item = ResponseInputItem::FunctionCallOutput {
             call_id: "call1".into(),
             output: FunctionCallOutputPayload {
@@ -588,7 +603,9 @@ mod tests {
         let json = serde_json::to_string(&item)?;
         let v: serde_json::Value = serde_json::from_str(&json)?;
 
-        assert_eq!(v.get("output").unwrap().as_str().unwrap(), "bad");
+        let output = v.get("output").expect("output field");
+        assert_eq!(output.get("content").and_then(Value::as_str), Some("bad"));
+        assert_eq!(output.get("success").and_then(Value::as_bool), Some(false));
         Ok(())
     }
 

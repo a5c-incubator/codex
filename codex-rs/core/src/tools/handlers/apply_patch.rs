@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
@@ -139,8 +140,8 @@ impl ToolHandler for ApplyPatchHandler {
                         let mut orchestrator = ToolOrchestrator::new();
                         let mut runtime = ApplyPatchRuntime::new();
                         let tool_ctx = ToolCtx {
-                            session: session.as_ref(),
-                            turn: turn.as_ref(),
+                            session: Arc::clone(&session),
+                            turn: Arc::clone(&turn),
                             call_id: call_id.clone(),
                             tool_name: tool_name.to_string(),
                         };
@@ -187,8 +188,8 @@ pub(crate) async fn intercept_apply_patch(
     command: &[String],
     cwd: &Path,
     timeout_ms: Option<u64>,
-    session: &Session,
-    turn: &TurnContext,
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
     tracker: Option<&SharedTurnDiffTracker>,
     call_id: &str,
     tool_name: &str,
@@ -198,10 +199,10 @@ pub(crate) async fn intercept_apply_patch(
             session
                 .record_model_warning(
                     format!("apply_patch was requested via {tool_name}. Use the apply_patch tool instead of exec_command."),
-                    turn,
+                    turn.as_ref(),
                 )
                 .await;
-            match apply_patch::apply_patch(turn, changes).await {
+            match apply_patch::apply_patch(turn.as_ref(), changes).await {
                 InternalApplyPatchInvocation::Output(item) => {
                     let content = item?;
                     Ok(Some(ToolOutput::Function {
@@ -214,8 +215,12 @@ pub(crate) async fn intercept_apply_patch(
                     let changes = convert_apply_patch_to_protocol(&apply.action);
                     let approval_keys = file_paths_for_action(&apply.action);
                     let emitter = ToolEmitter::apply_patch(changes.clone(), apply.auto_approved);
-                    let event_ctx =
-                        ToolEventCtx::new(session, turn, call_id, tracker.as_ref().copied());
+                    let event_ctx = ToolEventCtx::new(
+                        session.as_ref(),
+                        turn.as_ref(),
+                        call_id,
+                        tracker.as_ref().copied(),
+                    );
                     emitter.begin(event_ctx).await;
 
                     let req = ApplyPatchRequest {
@@ -230,16 +235,26 @@ pub(crate) async fn intercept_apply_patch(
                     let mut orchestrator = ToolOrchestrator::new();
                     let mut runtime = ApplyPatchRuntime::new();
                     let tool_ctx = ToolCtx {
-                        session,
-                        turn,
+                        session: Arc::clone(session),
+                        turn: Arc::clone(turn),
                         call_id: call_id.to_string(),
                         tool_name: tool_name.to_string(),
                     };
                     let out = orchestrator
-                        .run(&mut runtime, &req, &tool_ctx, turn, turn.approval_policy)
+                        .run(
+                            &mut runtime,
+                            &req,
+                            &tool_ctx,
+                            turn.as_ref(),
+                            turn.as_ref().approval_policy,
+                        )
                         .await;
-                    let event_ctx =
-                        ToolEventCtx::new(session, turn, call_id, tracker.as_ref().copied());
+                    let event_ctx = ToolEventCtx::new(
+                        session.as_ref(),
+                        turn.as_ref(),
+                        call_id,
+                        tracker.as_ref().copied(),
+                    );
                     let content = emitter.finish(event_ctx, out).await?;
                     Ok(Some(ToolOutput::Function {
                         content,

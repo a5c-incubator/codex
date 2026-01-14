@@ -39,6 +39,7 @@ use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
+use codex_subagent::SubagentDiscoveryOverrides;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use dirs::home_dir;
@@ -148,6 +149,9 @@ pub struct Config {
 
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
+
+    /// CLI-specified manifest and plugin overrides applied before user scopes.
+    pub subagent_discovery_overrides: Option<SubagentDiscoveryOverrides>,
 
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
@@ -1033,6 +1037,8 @@ pub struct ConfigOverrides {
     pub include_apply_patch_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
+    /// CLI-specified manifest overrides to merge into discovery targets.
+    pub subagent_discovery_overrides: Option<SubagentDiscoveryOverrides>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
 }
@@ -1102,6 +1108,7 @@ impl Config {
             include_apply_patch_tool: include_apply_patch_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
+            subagent_discovery_overrides,
             additional_writable_roots,
         } = overrides;
 
@@ -1336,6 +1343,7 @@ impl Config {
             user_instructions,
             base_instructions,
             developer_instructions,
+            subagent_discovery_overrides,
             compact_prompt,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
@@ -3216,6 +3224,7 @@ model_verbosity = "high"
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 base_instructions: None,
                 developer_instructions: None,
+                subagent_discovery_overrides: None,
                 compact_prompt: None,
                 forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
@@ -3300,6 +3309,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            subagent_discovery_overrides: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
@@ -3399,6 +3409,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            subagent_discovery_overrides: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
@@ -3484,6 +3495,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,
+            subagent_discovery_overrides: None,
             compact_prompt: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,

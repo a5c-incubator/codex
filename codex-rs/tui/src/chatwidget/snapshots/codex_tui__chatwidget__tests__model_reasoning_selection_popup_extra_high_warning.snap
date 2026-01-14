@@ -1,8 +1,14 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 1548
 expression: popup
 ---
+Active agent: Default session (session)
+Model: gpt-5.1-codex-max | Tools: inherit parent session
+Switch agents with ":use-agent <id>" or restart with "--use-subagent <id>" (see
+`codex agents list`).
+Inspect transcripts + resume tokens with `codex agents resume-status`.
+
+
   Select Reasoning Level for gpt-5.1-codex-max
 
   1. Low                   Fast responses with lighter reasoning

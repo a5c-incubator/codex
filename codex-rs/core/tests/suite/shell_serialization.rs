@@ -4,6 +4,7 @@
 use anyhow::Result;
 use codex_core::protocol::SandboxPolicy;
 use core_test_support::assert_regex_match;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -139,13 +140,9 @@ async fn shell_output_stays_json_without_freeform_apply_patch(
     .await?;
 
     let req = mock.last_request().expect("shell output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell output string");
+    let output = shell_output_text(&req, call_id);
 
-    let mut parsed: Value = serde_json::from_str(output)?;
+    let mut parsed: Value = serde_json::from_str(&output)?;
     if let Some(metadata) = parsed.get_mut("metadata").and_then(Value::as_object_mut) {
         let _ = metadata.remove("duration_seconds");
     }
@@ -165,6 +162,12 @@ async fn shell_output_stays_json_without_freeform_apply_patch(
     assert_regex_match(r"(?s)^shell json\n?$", stdout);
 
     Ok(())
+}
+
+fn shell_output_text(req: &ResponsesRequest, call_id: &str) -> String {
+    req.function_call_output_content_and_success(call_id)
+        .and_then(|(content, _)| content)
+        .unwrap_or_else(|| panic!("shell output text missing for {call_id}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -193,11 +196,7 @@ async fn shell_output_is_structured_with_freeform_apply_patch(
     let req = mock
         .last_request()
         .expect("structured shell output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("structured output string");
+    let output = shell_output_text(&req, call_id);
 
     assert!(
         serde_json::from_str::<Value>(output).is_err(),
@@ -208,7 +207,7 @@ Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 freeform shell
 ?$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }
@@ -244,13 +243,9 @@ async fn shell_output_preserves_fixture_json_without_serialization(
     .await?;
 
     let req = mock.last_request().expect("shell output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell output string");
+    let output = shell_output_text(&req, call_id);
 
-    let mut parsed: Value = serde_json::from_str(output)?;
+    let mut parsed: Value = serde_json::from_str(&output)?;
     if let Some(metadata) = parsed.get_mut("metadata").and_then(Value::as_object_mut) {
         let _ = metadata.remove("duration_seconds");
     }
@@ -310,14 +305,10 @@ async fn shell_output_structures_fixture_with_serialization(
     let req = mock
         .last_request()
         .expect("structured output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("structured output string");
+    let output = shell_output_text(&req, call_id);
 
     assert!(
-        serde_json::from_str::<Value>(output).is_err(),
+        serde_json::from_str::<Value>(&output).is_err(),
         "expected structured output to be plain text"
     );
     let (header, body) = output
@@ -361,22 +352,18 @@ async fn shell_output_for_freeform_tool_records_duration(
     let req = mock
         .last_request()
         .expect("structured output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("structured output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r#"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 $"#;
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     let wall_time_regex = Regex::new(r"(?m)^Wall (?:time|Clock): ([0-9]+(?:\.[0-9]+)?) seconds$")
         .expect("compile wall time regex");
     let wall_time_seconds = wall_time_regex
-        .captures(output)
+        .captures(&output)
         .and_then(|caps| caps.get(1))
         .and_then(|value| value.as_str().parse::<f32>().ok())
         .expect("expected structured shell output to contain wall time seconds");
@@ -414,14 +401,10 @@ async fn shell_output_reserializes_truncated_content(output_type: ShellModelOutp
     let req = mock
         .last_request()
         .expect("truncated output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("truncated output string");
+    let output = shell_output_text(&req, call_id);
 
     assert!(
-        serde_json::from_str::<Value>(output).is_err(),
+        serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text",
     );
     let truncated_pattern = r#"(?s)^Exit code: 0
@@ -441,7 +424,7 @@ Output:
 399
 400
 $"#;
-    assert_regex_match(truncated_pattern, output);
+    assert_regex_match(truncated_pattern, &output);
 
     Ok(())
 }
@@ -712,17 +695,13 @@ async fn shell_output_is_structured_for_nonzero_exit(output_type: ShellModelOutp
     .await?;
 
     let req = mock.last_request().expect("shell output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r"(?s)^Exit code: 42
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 ?$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }
@@ -764,18 +743,14 @@ async fn shell_command_output_is_freeform() -> Result<()> {
     let req = mock
         .last_request()
         .expect("shell_command output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell_command output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 shell command
 ?$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }
@@ -815,17 +790,13 @@ async fn shell_command_output_is_not_truncated_under_10k_bytes() -> Result<()> {
     let req = mock
         .last_request()
         .expect("shell_command output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell_command output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 1{10000}$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }
@@ -865,17 +836,13 @@ async fn shell_command_output_is_not_truncated_over_10k_bytes() -> Result<()> {
     let req = mock
         .last_request()
         .expect("shell_command output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("shell_command output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 1*…1 chars truncated…1*$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }
@@ -915,18 +882,14 @@ async fn local_shell_call_output_is_structured() -> Result<()> {
     let req = mock
         .last_request()
         .expect("local shell output request recorded");
-    let output_item = req.function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("local shell output string");
+    let output = shell_output_text(&req, call_id);
 
     let expected_pattern = r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
 local shell
 ?$";
-    assert_regex_match(expected_pattern, output);
+    assert_regex_match(expected_pattern, &output);
 
     Ok(())
 }

@@ -542,6 +542,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
             output_schema: None,
+            subagent: None,
         })
         .await?;
     timeout(
@@ -570,6 +571,7 @@ async fn turn_start_updates_sandbox_and_cwd_between_turns_v2() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: Some(ReasoningSummary::Auto),
             output_schema: None,
+            subagent: None,
         })
         .await?;
     timeout(

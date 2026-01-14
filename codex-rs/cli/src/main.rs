@@ -32,6 +32,7 @@ use owo_colors::OwoColorize;
 use std::path::PathBuf;
 use supports_color::Stream;
 
+mod agents_cmd;
 mod mcp_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -133,6 +134,9 @@ enum Subcommand {
 
     /// Inspect feature flags.
     Features(FeaturesCli),
+
+    /// Discover Claude-compatible subagents (including built-in Claude personas).
+    Agents(agents_cmd::AgentsCli),
 }
 
 #[derive(Debug, Parser)]
@@ -651,6 +655,9 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 }
             }
         },
+        Some(Subcommand::Agents(cmd)) => {
+            agents_cmd::run(cmd)?;
+        }
     }
 
     Ok(())

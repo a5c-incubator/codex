@@ -14,6 +14,7 @@ use codex_core::sandboxing::SandboxPermissions;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::user_input::UserInput;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_apply_patch_function_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -506,10 +507,10 @@ async fn submit_turn(
     Ok(())
 }
 
-fn parse_result(item: &Value) -> CommandResult {
-    let output_str = item
-        .get("output")
-        .and_then(Value::as_str)
+fn parse_result(request: &ResponsesRequest, call_id: &str) -> CommandResult {
+    let output_str = request
+        .function_call_output_content_and_success(call_id)
+        .and_then(|(content, _)| content)
         .expect("shell output payload");
     match serde_json::from_str::<Value>(output_str) {
         Ok(parsed) => {
@@ -1554,8 +1555,8 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
         }
     }
 
-    let output_item = results_mock.single_request().function_call_output(call_id);
-    let result = parse_result(&output_item);
+    let request = results_mock.single_request();
+    let result = parse_result(&request, call_id);
     scenario.expectation.verify(&test, &result)?;
 
     Ok(())
@@ -1759,11 +1760,8 @@ async fn approving_execpolicy_amendment_persists_policy_and_skips_future_prompts
         "unexpected policy contents: {policy_contents}"
     );
 
-    let first_output = parse_result(
-        &first_results
-            .single_request()
-            .function_call_output(call_id_first),
-    );
+    let first_request = first_results.single_request();
+    let first_output = parse_result(&first_request, call_id_first);
     assert_eq!(first_output.exit_code.unwrap_or(0), 0);
     assert!(
         first_output.stdout.is_empty(),
@@ -1817,11 +1815,8 @@ async fn approving_execpolicy_amendment_persists_policy_and_skips_future_prompts
 
     wait_for_completion_without_approval(&test).await;
 
-    let second_output = parse_result(
-        &second_results
-            .single_request()
-            .function_call_output(call_id_second),
-    );
+    let second_request = second_results.single_request();
+    let second_output = parse_result(&second_request, call_id_second);
     assert_eq!(second_output.exit_code.unwrap_or(0), 0);
     assert!(
         second_output.stdout.is_empty(),

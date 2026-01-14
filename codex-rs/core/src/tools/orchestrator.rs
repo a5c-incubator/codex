@@ -9,8 +9,12 @@ use crate::error::CodexErr;
 use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
 use crate::sandboxing::SandboxManager;
+use crate::subagents::hooks::HookInvocation;
+use crate::subagents::hooks::HookPhase;
+use crate::subagents::hooks::run_subagent_hooks;
 use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::HookSignal;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::SandboxOverride;
 use crate::tools::sandboxing::ToolCtx;
@@ -36,13 +40,20 @@ impl ToolOrchestrator {
         &mut self,
         tool: &mut T,
         req: &Rq,
-        tool_ctx: &ToolCtx<'_>,
+        tool_ctx: &ToolCtx,
         turn_ctx: &crate::codex::TurnContext,
         approval_policy: AskForApproval,
     ) -> Result<Out, ToolError>
     where
         T: ToolRuntime<Rq, Out>,
     {
+        let hook_invocation = HookInvocation::from_tool_ctx(tool_ctx);
+        run_subagent_hooks(
+            HookPhase::PreToolUse,
+            &hook_invocation,
+            &HookSignal::pending(),
+        )
+        .await;
         let otel = turn_ctx.client.get_otel_manager();
         let otel_tn = &tool_ctx.tool_name;
         let otel_ci = &tool_ctx.call_id;
@@ -64,7 +75,7 @@ impl ToolOrchestrator {
             }
             ExecApprovalRequirement::NeedsApproval { reason, .. } => {
                 let approval_ctx = ApprovalCtx {
-                    session: tool_ctx.session,
+                    session: tool_ctx.session.as_ref(),
                     turn: turn_ctx,
                     call_id: &tool_ctx.call_id,
                     retry_reason: reason,
@@ -103,7 +114,7 @@ impl ToolOrchestrator {
             codex_linux_sandbox_exe: turn_ctx.codex_linux_sandbox_exe.as_ref(),
         };
 
-        match tool.run(req, &initial_attempt, tool_ctx).await {
+        let result = match tool.run(req, &initial_attempt, tool_ctx).await {
             Ok(out) => {
                 // We have a successful initial result
                 Ok(out)
@@ -126,7 +137,7 @@ impl ToolOrchestrator {
                 if !tool.should_bypass_approval(approval_policy, already_approved) {
                     let reason_msg = build_denial_reason_from_output(output.as_ref());
                     let approval_ctx = ApprovalCtx {
-                        session: tool_ctx.session,
+                        session: tool_ctx.session.as_ref(),
                         turn: turn_ctx,
                         call_id: &tool_ctx.call_id,
                         retry_reason: Some(reason_msg),
@@ -157,7 +168,20 @@ impl ToolOrchestrator {
                 (*tool).run(req, &escalated_attempt, tool_ctx).await
             }
             other => other,
+        };
+
+        match &result {
+            Ok(out) => {
+                let signal = tool.hook_signal_for_output(req, out);
+                run_subagent_hooks(HookPhase::PostToolUse, &hook_invocation, &signal).await;
+            }
+            Err(err) => {
+                let signal = tool.hook_signal_for_error(req, err);
+                run_subagent_hooks(HookPhase::Stop, &hook_invocation, &signal).await;
+            }
         }
+
+        result
     }
 }
 

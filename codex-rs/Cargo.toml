@@ -47,6 +47,7 @@ members = [
     "utils/string",
     "codex-client",
     "codex-api",
+    "codex-subagent",
 ]
 resolver = "2"
 
@@ -93,6 +94,7 @@ codex-rmcp-client = { path = "rmcp-client" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-tui = { path = "tui" }
 codex-tui2 = { path = "tui2" }
+codex-subagent = { path = "codex-subagent" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
@@ -189,6 +191,7 @@ serde = "1"
 serde_json = "1"
 serde_with = "3.16"
 serde_yaml = "0.9"
+strip-ansi-escapes = "0.1"
 serial_test = "3.2.0"
 sha1 = "0.10.6"
 sha2 = "0.10"

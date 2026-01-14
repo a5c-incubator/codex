@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Deserialize;
+use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
@@ -98,12 +99,10 @@ fn parse_powershell_invocation(executable: &str, args: &[String]) -> Option<Vec<
 /// Tokenizes an inline PowerShell script and delegates to the command splitter.
 /// Examples of when this is called: pwsh.exe -Command '<script>' or pwsh.exe -Command:<script>
 fn parse_powershell_script(executable: &str, script: &str) -> Option<Vec<Vec<String>>> {
-    if let PowershellParseOutcome::Commands(commands) =
-        parse_with_powershell_ast(executable, script)
-    {
-        Some(commands)
-    } else {
-        None
+    match parse_with_powershell_ast(executable, script) {
+        PowershellParseOutcome::Commands(commands) => Some(commands),
+        PowershellParseOutcome::Unavailable => parse_without_powershell(script),
+        _ => None,
     }
 }
 
@@ -147,8 +146,42 @@ fn parse_with_powershell_ast(executable: &str, script: &str) -> PowershellParseO
                 PowershellParseOutcome::Failed
             }
         }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => PowershellParseOutcome::Unavailable,
         _ => PowershellParseOutcome::Failed,
     }
+}
+
+fn parse_without_powershell(script: &str) -> Option<Vec<Vec<String>>> {
+    let trimmed = script.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | '$' | '{' | '}' | '[' | ']' | ';' | '&' | '<' | '>' | '(' | ')'
+        )
+    }) {
+        return None;
+    }
+
+    let mut commands = Vec::new();
+    for part in trimmed.split('|') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        let words: Vec<String> = part
+            .split_whitespace()
+            .map(std::string::ToString::to_string)
+            .collect();
+        if words.is_empty() {
+            return None;
+        }
+        commands.push(words);
+    }
+    Some(commands)
 }
 
 fn encode_powershell_base64(script: &str) -> String {
@@ -194,6 +227,7 @@ impl PowershellParserOutput {
 enum PowershellParseOutcome {
     Commands(Vec<Vec<String>>),
     Unsupported,
+    Unavailable,
     Failed,
 }
 

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -9,9 +11,15 @@ use std::sync::atomic::Ordering;
 use crate::AuthManager;
 use crate::CodexAuth;
 use crate::SandboxState;
+use crate::agent::ActivationContext;
+use crate::agent::ActivationError;
 use crate::agent::AgentControl;
+use crate::agent::AgentRegistry;
+use crate::agent::AgentRuntimeProfile;
 use crate::agent::AgentStatus;
+use crate::agent::RefreshInvocation;
 use crate::agent::agent_status_from_event;
+use crate::agent::registry::RefreshOutcome;
 use crate::client_common::REVIEW_PROMPT;
 use crate::compact;
 use crate::compact::run_inline_auto_compact_task;
@@ -44,10 +52,16 @@ use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubagentOverride;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
 use codex_rmcp_client::ElicitationResponse;
+use codex_subagent::DiscoveryTargetArgs;
+use codex_subagent::FsManifestLoader;
+use codex_subagent::HookSet;
+use codex_subagent::SubagentDiscoveryOverrides;
+use codex_subagent::build_discovery_targets;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
@@ -133,9 +147,12 @@ use crate::skills::SkillInjections;
 use crate::skills::SkillMetadata;
 use crate::skills::SkillsManager;
 use crate::skills::build_skill_injections;
+use crate::state::ActiveSubagentRuntime;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
 use crate::state::SessionState;
+use crate::subagents::SubagentResumeToken;
+use crate::subagents::SubagentTranscriptStore;
 use crate::tasks::GhostSnapshotTask;
 use crate::tasks::ReviewTask;
 use crate::tasks::SessionTask;
@@ -146,6 +163,7 @@ use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::tools::spec::ToolsConfig;
 use crate::tools::spec::ToolsConfigParams;
+use crate::tools::spec::build_specs;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::user_instructions::DeveloperInstructions;
@@ -266,6 +284,7 @@ impl Codex {
             user_instructions,
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
+            subagent_discovery_overrides: config.subagent_discovery_overrides.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
@@ -364,6 +383,7 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     next_internal_sub_id: AtomicU64,
+    agent_registration_done: AtomicBool,
 }
 
 /// The context needed for a single turn of the thread.
@@ -388,6 +408,11 @@ pub(crate) struct TurnContext {
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) truncation_policy: TruncationPolicy,
+    /// Snapshot of the active subagent runtime for this turn, if any.
+    /// Carries the manifest hook metadata and tool allow list so the
+    /// orchestrator can honor scoped permissions without mutating the
+    /// session-level configuration.
+    pub(crate) active_subagent: Option<ActiveSubagentRuntime>,
 }
 
 impl TurnContext {
@@ -401,6 +426,26 @@ impl TurnContext {
         self.compact_prompt
             .as_deref()
             .unwrap_or(compact::SUMMARIZATION_PROMPT)
+    }
+
+    pub(crate) fn has_active_subagent(&self) -> bool {
+        self.active_subagent.is_some()
+    }
+
+    pub(crate) fn active_subagent(&self) -> Option<&ActiveSubagentRuntime> {
+        self.active_subagent.as_ref()
+    }
+
+    pub(crate) fn allowed_tool_names(&self) -> Option<&[String]> {
+        self.active_subagent
+            .as_ref()
+            .map(ActiveSubagentRuntime::allowed_tools)
+    }
+
+    pub(crate) fn hook_set(&self) -> Option<&HookSet> {
+        self.active_subagent
+            .as_ref()
+            .map(ActiveSubagentRuntime::hooks)
     }
 }
 
@@ -426,6 +471,9 @@ pub(crate) struct SessionConfiguration {
 
     /// Compact prompt override.
     compact_prompt: Option<String>,
+
+    /// CLI-provided subagent manifest overrides.
+    subagent_discovery_overrides: Option<SubagentDiscoveryOverrides>,
 
     /// When to escalate for approval for execution
     approval_policy: Constrained<AskForApproval>,
@@ -481,6 +529,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) reasoning_effort: Option<Option<ReasoningEffortConfig>>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
+    pub(crate) subagent: Option<SubagentOverride>,
 }
 
 impl Session {
@@ -495,6 +544,193 @@ impl Session {
         per_turn_config
     }
 
+    async fn ensure_subagents_registered(&self, client: &ModelClient) {
+        if self
+            .agent_registration_done
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let manifests = {
+            let registry = self.services.agent_registry.read().await;
+            registry.manifests_snapshot()
+        };
+        if manifests.is_empty() {
+            return;
+        }
+        let counts = AgentRegistry::manifest_counts(&manifests);
+        let provider_name = client.provider().name.as_str();
+        match client.register_subagents(&manifests).await {
+            Ok(()) => {
+                info!(
+                    provider = provider_name,
+                    custom_manifests = counts.custom,
+                    built_in_manifests = counts.built_in,
+                    total_manifests = manifests.len(),
+                    "registered subagents with model provider"
+                );
+            }
+            Err(err) => {
+                let validation_failures = match &err {
+                    CodexErr::InvalidRequest(message) => Some(message.as_str()),
+                    _ => None,
+                };
+                if let Some(details) = validation_failures {
+                    warn!(
+                        provider = provider_name,
+                        custom_manifests = counts.custom,
+                        built_in_manifests = counts.built_in,
+                        total_manifests = manifests.len(),
+                        error = ?err,
+                        validation_failures = details,
+                        "failed to register subagents with model provider"
+                    );
+                } else {
+                    warn!(
+                        provider = provider_name,
+                        custom_manifests = counts.custom,
+                        built_in_manifests = counts.built_in,
+                        total_manifests = manifests.len(),
+                        error = ?err,
+                        "failed to register subagents with model provider"
+                    );
+                }
+                self.agent_registration_done.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+
+    async fn collect_available_tool_names(
+        &self,
+        session_configuration: &SessionConfiguration,
+    ) -> (Vec<String>, usize, usize) {
+        let per_turn_config = Self::build_per_turn_config(session_configuration);
+        let model_info = self
+            .services
+            .models_manager
+            .construct_model_info(session_configuration.model.as_str(), &per_turn_config)
+            .await;
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &per_turn_config.features,
+        });
+        let (specs, _) = build_specs(&tools_config, None).build();
+        let mut built_in_tool_names = specs
+            .iter()
+            .map(|spec| spec.spec.name().to_string())
+            .collect::<Vec<_>>();
+        let built_in_tool_count = built_in_tool_names.len();
+
+        let mcp_tools = self
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .list_all_tools()
+            .await;
+        let mut mcp_tool_names = mcp_tools.into_keys().collect::<Vec<_>>();
+        mcp_tool_names.sort();
+        let mcp_tool_count = mcp_tool_names.len();
+
+        built_in_tool_names.extend(mcp_tool_names);
+        (built_in_tool_names, built_in_tool_count, mcp_tool_count)
+    }
+
+    pub(crate) async fn activate_subagent(
+        &self,
+        agent_id: &str,
+        resume_token: Option<String>,
+    ) -> Result<Arc<AgentRuntimeProfile>, ActivationError> {
+        let session_configuration = {
+            let state = self.state.lock().await;
+            state.session_configuration.clone()
+        };
+        let (available_tools, built_in_tool_count, mcp_tool_count) = self
+            .collect_available_tool_names(&session_configuration)
+            .await;
+        let approval_policy = session_configuration.approval_policy.value();
+        let parent_model = session_configuration.model.clone();
+        let activation_ctx =
+            ActivationContext::new(parent_model.as_str(), approval_policy, &available_tools);
+
+        let registry = self.services.agent_registry.read().await;
+        let activation_result = registry.activate(agent_id, &activation_ctx);
+        drop(registry);
+
+        let profile = match activation_result {
+            Ok(profile) => profile,
+            Err(err) => {
+                self.clear_active_subagent().await;
+                warn!(
+                    agent_id = agent_id,
+                    error = %err,
+                    "failed to activate subagent runtime"
+                );
+                return Err(err);
+            }
+        };
+
+        let runtime = Arc::new(profile);
+        let cached_policy = runtime.approval_policy();
+        let cached_tools = runtime.allowed_tools().to_vec();
+        let cached_hooks = runtime.hooks().clone();
+        if let Some(token) = resume_token
+            && let Err(err) = self.apply_resume_history(agent_id, &token).await
+        {
+            warn!(agent_id = agent_id, error = %err, "failed to apply resume history");
+        }
+        let manifest = runtime.manifest();
+        let transcript = match self
+            .services
+            .subagent_transcripts
+            .start_run(
+                manifest.id.as_str(),
+                runtime.session_source(),
+                &session_configuration.cwd,
+                Some(manifest.body.as_str()),
+                Some(session_configuration.provider.name.as_str()),
+            )
+            .await
+        {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                warn!(
+                    agent_id = agent_id,
+                    error = %err,
+                    "failed to initialize subagent transcript"
+                );
+                None
+            }
+        };
+        let snapshot = ActiveSubagentRuntime::new(
+            Arc::clone(&runtime),
+            cached_policy,
+            cached_tools,
+            cached_hooks,
+            transcript,
+        );
+        self.services.set_active_subagent(snapshot).await;
+
+        let manifest = runtime.manifest();
+        let is_built_in = manifest.kind.is_built_in();
+        info!(
+            agent_id = agent_id,
+            built_in = is_built_in,
+            model = runtime.model(),
+            approval_policy = ?runtime.approval_policy(),
+            built_in_tools = built_in_tool_count,
+            mcp_tools = mcp_tool_count,
+            "activated subagent runtime"
+        );
+
+        Ok(runtime)
+    }
+
+    pub(crate) async fn clear_active_subagent(&self) {
+        self.services.clear_active_subagent().await;
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn make_turn_context(
         auth_manager: Option<Arc<AuthManager>>,
@@ -505,6 +741,7 @@ impl Session {
         model_info: ModelInfo,
         conversation_id: ThreadId,
         sub_id: String,
+        active_subagent: Option<ActiveSubagentRuntime>,
     ) -> TurnContext {
         let otel_manager = otel_manager.clone().with_model(
             session_configuration.model.as_str(),
@@ -546,7 +783,31 @@ impl Session {
             codex_linux_sandbox_exe: per_turn_config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             truncation_policy: model_info.truncation_policy.into(),
+            active_subagent,
         }
+    }
+
+    fn apply_active_subagent_overrides(
+        mut session_configuration: SessionConfiguration,
+        active_subagent_runtime: Option<ActiveSubagentRuntime>,
+    ) -> (SessionConfiguration, Option<ActiveSubagentRuntime>) {
+        if let Some(runtime) = active_subagent_runtime.as_ref() {
+            let profile = runtime.runtime();
+            session_configuration.model = profile.model().to_owned();
+            session_configuration.session_source = profile.session_source().clone();
+
+            let mut approval_policy = session_configuration.approval_policy.clone();
+            if let Err(err) = approval_policy.set(runtime.approval_policy()) {
+                warn!(
+                    error = %err,
+                    "failed to apply subagent approval override; falling back to allow-any constraint"
+                );
+                approval_policy = Constrained::allow_any(runtime.approval_policy());
+            }
+            session_configuration.approval_policy = approval_policy;
+        }
+
+        (session_configuration, active_subagent_runtime)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -683,6 +944,12 @@ impl Session {
         }
         let state = SessionState::new(session_configuration.clone());
 
+        let agent_registry = init_agent_registry(
+            session_configuration.cwd.as_path(),
+            session_configuration.subagent_discovery_overrides.clone(),
+            Some(&otel_manager),
+        );
+
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
             mcp_startup_cancellation_token: CancellationToken::new(),
@@ -698,6 +965,9 @@ impl Session {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            agent_registry,
+            active_subagent_runtime: RwLock::new(None),
+            subagent_transcripts: SubagentTranscriptStore::new(config.codex_home.clone()),
         };
 
         let sess = Arc::new(Session {
@@ -709,6 +979,7 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            agent_registration_done: AtomicBool::new(false),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -929,6 +1200,10 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
     ) -> Arc<TurnContext> {
+        let active_subagent_runtime = self.services.active_subagent().await;
+        let (session_configuration, active_subagent_runtime) =
+            Self::apply_active_subagent_overrides(session_configuration, active_subagent_runtime);
+
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
 
         if sandbox_policy_changed {
@@ -963,7 +1238,9 @@ impl Session {
             model_info,
             self.conversation_id,
             sub_id,
+            active_subagent_runtime,
         );
+        self.ensure_subagents_registered(&turn_context.client).await;
         if let Some(final_schema) = final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
         }
@@ -1244,6 +1521,30 @@ impl Session {
         self.send_raw_response_items(turn_context, items).await;
     }
 
+    async fn apply_resume_history(&self, agent_id: &str, token_str: &str) -> io::Result<()> {
+        let token = SubagentResumeToken::decode(token_str)?;
+        if token.agent_id != agent_id {
+            return Err(io::Error::other(format!(
+                "resume token targets `{}` but `{agent_id}` requested",
+                token.agent_id
+            )));
+        }
+        let responses = self
+            .services
+            .subagent_transcripts
+            .resume_history(&token)
+            .await?;
+        if responses.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut state = self.state.lock().await;
+            state.record_items(responses.iter(), TruncationPolicy::Tokens(usize::MAX));
+        }
+        self.persist_rollout_response_items(&responses).await;
+        Ok(())
+    }
+
     fn reconstruct_history_from_rollout(
         &self,
         turn_context: &TurnContext,
@@ -1367,6 +1668,16 @@ impl Session {
             && let Err(e) = rec.record_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
+        }
+        if !items.is_empty()
+            && let Some(active) = self.services.active_subagent().await
+            && let Some(transcript) = active.transcript()
+            && let Err(err) = transcript.record_items(items).await
+        {
+            warn!(
+                error = %err,
+                "failed to record subagent transcript items"
+            );
         }
     }
 
@@ -1658,6 +1969,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 model,
                 effort,
                 summary,
+                subagent,
             } => {
                 handlers::override_turn_context(
                     &sess,
@@ -1669,6 +1981,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                         model,
                         reasoning_effort: effort,
                         reasoning_summary: summary,
+                        subagent,
                         ..Default::default()
                     },
                 )
@@ -1741,6 +2054,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
 
 /// Operation handlers
 mod handlers {
+    use crate::agent::ActivationError;
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::TurnContext;
@@ -1751,10 +2065,14 @@ mod handlers {
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::review_prompts::resolve_review_request;
+    use crate::subagents::hooks::HookInvocation;
+    use crate::subagents::hooks::HookPhase;
+    use crate::subagents::hooks::run_subagent_hooks;
     use crate::tasks::CompactTask;
     use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandTask;
+    use crate::tools::sandboxing::HookSignal;
     use codex_protocol::custom_prompts::CustomPrompt;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
@@ -1766,6 +2084,7 @@ mod handlers {
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
     use codex_protocol::protocol::SkillsListEntry;
+    use codex_protocol::protocol::SubagentOverride;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::WarningEvent;
@@ -1785,11 +2104,31 @@ mod handlers {
     }
 
     pub async fn override_turn_context(
-        sess: &Session,
+        sess: &Arc<Session>,
         sub_id: String,
-        updates: SessionSettingsUpdate,
+        mut updates: SessionSettingsUpdate,
     ) {
+        let subagent_override = updates.subagent.take();
+        let override_for_error = subagent_override.clone();
         if let Err(err) = sess.update_settings(updates).await {
+            if let Some(subagent) = override_for_error {
+                let message = err.to_string();
+                log_override_from_settings_failure(sess, &subagent, message.as_str()).await;
+            }
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: err.to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        if let Some(subagent) = subagent_override
+            && let Err(err) = apply_subagent_override(sess, &sub_id, subagent).await
+        {
             sess.send_event_raw(Event {
                 id: sub_id,
                 msg: EventMsg::Error(ErrorEvent {
@@ -1799,6 +2138,336 @@ mod handlers {
             })
             .await;
         }
+    }
+
+    async fn apply_subagent_override(
+        sess: &Arc<Session>,
+        sub_id: &str,
+        subagent: SubagentOverride,
+    ) -> Result<(), ActivationError> {
+        match subagent {
+            SubagentOverride::Clear { origin } => {
+                let active_runtime = sess.services.active_subagent().await;
+                if let Some(runtime) = active_runtime {
+                    let runtime_ref = runtime.runtime();
+                    let manifest = runtime_ref.manifest();
+                    let cleared_agent_id = manifest.id.clone();
+                    let cleared_scope = manifest.source.clone();
+                    clear_active_subagent_with_hooks(sess, sub_id, "clear").await;
+                    emit_subagent_switch_event(
+                        sess,
+                        SubagentSwitchAction::Clear,
+                        Some(cleared_agent_id.as_str()),
+                        cleared_scope.as_ref(),
+                        origin,
+                        SubagentSwitchStatus::Success,
+                        None,
+                    )
+                    .await;
+                } else {
+                    emit_subagent_switch_event(
+                        sess,
+                        SubagentSwitchAction::Clear,
+                        None,
+                        None,
+                        origin,
+                        SubagentSwitchStatus::NoActiveRuntime,
+                        None,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+            SubagentOverride::Activate { id, resume, origin } => {
+                if is_subagent_active(sess, &id).await {
+                    emit_subagent_switch_event(
+                        sess,
+                        SubagentSwitchAction::Activate,
+                        Some(id.as_str()),
+                        None,
+                        origin,
+                        SubagentSwitchStatus::AlreadyActive,
+                        None,
+                    )
+                    .await;
+                    return Ok(());
+                }
+                if let Err(err) = ensure_agent_known(sess, &id).await {
+                    let message = err.to_string();
+                    emit_subagent_switch_event(
+                        sess,
+                        SubagentSwitchAction::Activate,
+                        Some(id.as_str()),
+                        None,
+                        origin,
+                        SubagentSwitchStatus::Error,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    return Err(err);
+                }
+                clear_active_subagent_with_hooks(sess, sub_id, "switch").await;
+                match sess.activate_subagent(&id, resume.map(|r| r.token)).await {
+                    Ok(runtime) => {
+                        let snapshot = sess.services.active_subagent().await;
+                        emit_subagent_lifecycle_event(
+                            sess,
+                            sub_id,
+                            runtime.as_ref(),
+                            snapshot,
+                            codex_protocol::protocol::SubagentLifecyclePhase::Activated,
+                            None,
+                        )
+                        .await;
+                        emit_subagent_switch_event(
+                            sess,
+                            SubagentSwitchAction::Activate,
+                            Some(id.as_str()),
+                            runtime.manifest().source.as_ref(),
+                            origin,
+                            SubagentSwitchStatus::Success,
+                            None,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        emit_subagent_switch_event(
+                            sess,
+                            SubagentSwitchAction::Activate,
+                            Some(id.as_str()),
+                            None,
+                            origin,
+                            SubagentSwitchStatus::Error,
+                            Some(message.as_str()),
+                        )
+                        .await;
+                        Err(err)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn emit_subagent_lifecycle_event(
+        sess: &Arc<Session>,
+        sub_id: &str,
+        runtime: &crate::agent::AgentRuntimeProfile,
+        active_runtime: Option<crate::state::ActiveSubagentRuntime>,
+        phase: codex_protocol::protocol::SubagentLifecyclePhase,
+        resume_token: Option<String>,
+    ) {
+        let sandbox_policy = {
+            let state = sess.state.lock().await;
+            state.session_configuration.sandbox_policy.get().clone()
+        };
+        let manifest = runtime.manifest();
+        let agent_id = manifest.id.clone();
+        let manifest_digest = manifest.digest.clone();
+        let approval_policy = runtime.approval_policy();
+        let model = runtime.model().to_owned();
+        let session_source = runtime.session_source().clone();
+        let tool_scope = codex_protocol::protocol::SubagentToolScope {
+            mode: if manifest.tool_scope.is_inherit() {
+                codex_protocol::protocol::SubagentToolScopeMode::Inherit
+            } else {
+                codex_protocol::protocol::SubagentToolScopeMode::Restricted
+            },
+            tools: active_runtime
+                .as_ref()
+                .map(|snapshot| snapshot.allowed_tools().to_vec())
+                .unwrap_or_else(|| runtime.allowed_tools().to_vec()),
+        };
+
+        sess.services.otel_manager.subagent_lifecycle(
+            phase,
+            agent_id.as_str(),
+            manifest_digest.as_deref(),
+            approval_policy,
+            &sandbox_policy,
+            resume_token.as_deref(),
+        );
+
+        let event = codex_protocol::protocol::SubagentLifecycleEvent {
+            thread_id: sess.conversation_id,
+            call_id: sub_id.to_string(),
+            phase,
+            agent_id,
+            agent_name: Some(manifest.name.clone()),
+            manifest_digest,
+            model: Some(model),
+            session_source: Some(session_source),
+            tool_scope: Some(tool_scope),
+            approval_policy,
+            sandbox_policy,
+            resume_token,
+        };
+        sess.send_event_raw(Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::SubagentLifecycle(event),
+        })
+        .await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum SubagentSwitchAction {
+        Activate,
+        Clear,
+    }
+
+    impl SubagentSwitchAction {
+        fn as_str(&self) -> &'static str {
+            match self {
+                Self::Activate => "activate",
+                Self::Clear => "clear",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SubagentSwitchStatus {
+        Success,
+        AlreadyActive,
+        NoActiveRuntime,
+        Error,
+    }
+
+    impl SubagentSwitchStatus {
+        fn as_str(&self) -> &'static str {
+            match self {
+                Self::Success => "success",
+                Self::AlreadyActive => "already_active",
+                Self::NoActiveRuntime => "no_active_runtime",
+                Self::Error => "error",
+            }
+        }
+    }
+
+    async fn emit_subagent_switch_event(
+        sess: &Arc<Session>,
+        action: SubagentSwitchAction,
+        agent_id: Option<&str>,
+        scope: Option<&codex_subagent::DiscoveryScope>,
+        origin: Option<codex_protocol::protocol::SubagentOverrideOrigin>,
+        status: SubagentSwitchStatus,
+        error: Option<&str>,
+    ) {
+        let session_source = {
+            let state = sess.state.lock().await;
+            state.session_configuration.session_source.clone()
+        };
+        let scope_label = scope
+            .map(crate::agent::registry::telemetry_scope_label)
+            .map(String::from);
+        sess.services.otel_manager.subagent_switch(
+            action.as_str(),
+            status.as_str(),
+            &session_source,
+            agent_id,
+            scope_label.as_deref(),
+            origin.as_ref(),
+            error,
+        );
+    }
+
+    async fn log_override_from_settings_failure(
+        sess: &Arc<Session>,
+        subagent: &SubagentOverride,
+        error: &str,
+    ) {
+        match subagent {
+            SubagentOverride::Clear { origin } => {
+                emit_subagent_switch_event(
+                    sess,
+                    SubagentSwitchAction::Clear,
+                    None,
+                    None,
+                    *origin,
+                    SubagentSwitchStatus::Error,
+                    Some(error),
+                )
+                .await;
+            }
+            SubagentOverride::Activate { id, origin, .. } => {
+                emit_subagent_switch_event(
+                    sess,
+                    SubagentSwitchAction::Activate,
+                    Some(id.as_str()),
+                    None,
+                    *origin,
+                    SubagentSwitchStatus::Error,
+                    Some(error),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn ensure_agent_known(
+        sess: &Arc<Session>,
+        agent_id: &str,
+    ) -> Result<(), ActivationError> {
+        let registry = sess.services.agent_registry.read().await;
+        if registry.has_agent(agent_id) {
+            Ok(())
+        } else {
+            Err(ActivationError::UnknownAgent {
+                agent_id: agent_id.to_string(),
+            })
+        }
+    }
+
+    async fn is_subagent_active(sess: &Arc<Session>, agent_id: &str) -> bool {
+        sess.services
+            .active_subagent()
+            .await
+            .map(|runtime| runtime.runtime().manifest().id.clone())
+            .as_deref()
+            == Some(agent_id)
+    }
+
+    async fn clear_active_subagent_with_hooks(sess: &Arc<Session>, sub_id: &str, reason: &str) {
+        let Some(active_runtime) = sess.services.active_subagent().await else {
+            return;
+        };
+
+        let hook_turn = sess
+            .new_default_turn_with_sub_id(format!("{sub_id}-subagent-stop"))
+            .await;
+        let invocation = HookInvocation::for_session_event(
+            Arc::clone(sess),
+            hook_turn,
+            None,
+            format!("{reason}-{sub_id}"),
+        );
+        run_subagent_hooks(HookPhase::Stop, &invocation, &HookSignal::pending()).await;
+        let runtime = active_runtime.runtime();
+        let cached_snapshot = Some(active_runtime.clone());
+        let resume_token = match active_runtime.finish_transcript().await {
+            Ok(token) => token,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "failed to finalize subagent transcript during clear"
+                );
+                None
+            }
+        };
+        emit_subagent_lifecycle_event(
+            sess,
+            sub_id,
+            runtime.as_ref(),
+            cached_snapshot,
+            codex_protocol::protocol::SubagentLifecyclePhase::Stopped,
+            resume_token,
+        )
+        .await;
+        info!(
+            agent_id = %active_runtime.runtime().manifest().id,
+            "cleared active subagent runtime"
+        );
+        sess.clear_active_subagent().await;
     }
 
     pub async fn user_input_or_turn(
@@ -1827,6 +2496,7 @@ mod handlers {
                     reasoning_effort: Some(effort),
                     reasoning_summary: Some(summary),
                     final_output_json_schema: Some(final_output_json_schema),
+                    subagent: None,
                 },
             ),
             Op::UserInput {
@@ -1836,6 +2506,7 @@ mod handlers {
                 items,
                 SessionSettingsUpdate {
                     final_output_json_schema: Some(final_output_json_schema),
+                    subagent: None,
                     ..Default::default()
                 },
             ),
@@ -2271,6 +2942,7 @@ async fn spawn_review_thread(
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         truncation_policy: model_info.truncation_policy.into(),
+        active_subagent: None,
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2507,6 +3179,7 @@ async fn run_turn(
                 .map(|(name, tool)| (name, tool.tool))
                 .collect(),
         ),
+        turn_context.allowed_tool_names(),
     ));
 
     let model_supports_parallel = turn_context
@@ -2859,6 +3532,68 @@ pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -
     })
 }
 
+fn init_agent_registry(
+    cwd: &Path,
+    overrides: Option<SubagentDiscoveryOverrides>,
+    otel: Option<&OtelManager>,
+) -> Arc<RwLock<AgentRegistry>> {
+    let loader = Arc::new(FsManifestLoader::new());
+    let mut registry = AgentRegistry::new(loader);
+    let targets = match overrides.as_ref() {
+        Some(overrides) => build_discovery_targets(&DiscoveryTargetArgs {
+            cwd,
+            project_dir_override: None,
+            user_dir_override: None,
+            overrides,
+        })
+        .unwrap_or_else(|err| {
+            warn!(
+                error = %err,
+                "failed to apply CLI subagent overrides; falling back to defaults"
+            );
+            AgentRegistry::default_targets(cwd)
+        }),
+        None => AgentRegistry::default_targets(cwd),
+    };
+    match registry.refresh_with_telemetry(&targets, otel, RefreshInvocation::SessionStartup) {
+        Ok(RefreshOutcome { report, issues }) => {
+            info!(
+                custom = report.custom_manifests(),
+                built_ins = report.built_in_manifests,
+                duplicates = report.skipped_duplicates,
+                issues = issues.len(),
+                scope_cli = report.scope_breakdown.cli,
+                scope_plugin = report.scope_breakdown.plugin,
+                scope_project = report.scope_breakdown.project,
+                scope_user = report.scope_breakdown.user,
+                "loaded subagent manifests"
+            );
+            if !issues.is_empty() {
+                for issue in issues {
+                    let path = issue.path_label().unwrap_or_else(|| "<unknown>".into());
+                    let scope = issue
+                        .scope_label()
+                        .unwrap_or_else(|| "unknown scope".into());
+                    warn!(
+                        path = %path,
+                        scope = %scope,
+                        "manifest validation issue: {}",
+                        issue.message
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            let error_message = err.to_string();
+            warn!(
+                "failed to load subagent manifests from {}: {error_message}",
+                cwd.display()
+            );
+        }
+    }
+    Arc::new(RwLock::new(registry))
+}
+
 #[cfg(test)]
 pub(crate) use tests::make_session_and_context;
 
@@ -3171,6 +3906,7 @@ mod tests {
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
+            subagent_discovery_overrides: config.subagent_discovery_overrides.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
@@ -3237,6 +3973,7 @@ mod tests {
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
+            subagent_discovery_overrides: config.subagent_discovery_overrides.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
@@ -3487,6 +4224,7 @@ mod tests {
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
+            subagent_discovery_overrides: config.subagent_discovery_overrides.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
@@ -3507,6 +4245,11 @@ mod tests {
 
         let state = SessionState::new(session_configuration.clone());
         let skills_manager = Arc::new(SkillsManager::new(config.codex_home.clone()));
+        let agent_registry = init_agent_registry(
+            session_configuration.cwd.as_path(),
+            session_configuration.subagent_discovery_overrides.clone(),
+            Some(&otel_manager),
+        );
 
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
@@ -3523,6 +4266,9 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            agent_registry,
+            active_subagent_runtime: RwLock::new(None),
+            subagent_transcripts: SubagentTranscriptStore::new(config.codex_home.clone()),
         };
 
         let turn_context = Session::make_turn_context(
@@ -3534,6 +4280,7 @@ mod tests {
             model_info,
             conversation_id,
             "turn_id".to_string(),
+            None,
         );
 
         let session = Session {
@@ -3545,6 +4292,7 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            agent_registration_done: AtomicBool::new(false),
         };
 
         (session, turn_context)
@@ -3581,6 +4329,7 @@ mod tests {
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
+            subagent_discovery_overrides: config.subagent_discovery_overrides.clone(),
             approval_policy: config.approval_policy.clone(),
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
@@ -3602,6 +4351,12 @@ mod tests {
         let state = SessionState::new(session_configuration.clone());
         let skills_manager = Arc::new(SkillsManager::new(config.codex_home.clone()));
 
+        let agent_registry = init_agent_registry(
+            session_configuration.cwd.as_path(),
+            session_configuration.subagent_discovery_overrides.clone(),
+            Some(&otel_manager),
+        );
+
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
             mcp_startup_cancellation_token: CancellationToken::new(),
@@ -3617,6 +4372,9 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills_manager,
             agent_control,
+            agent_registry,
+            active_subagent_runtime: RwLock::new(None),
+            subagent_transcripts: SubagentTranscriptStore::new(config.codex_home.clone()),
         };
 
         let turn_context = Arc::new(Session::make_turn_context(
@@ -3628,6 +4386,7 @@ mod tests {
             model_info,
             conversation_id,
             "turn_id".to_string(),
+            None,
         ));
 
         let session = Arc::new(Session {
@@ -3639,6 +4398,7 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            agent_registration_done: AtomicBool::new(false),
         });
 
         (session, turn_context, rx_event)
@@ -3826,6 +4586,7 @@ mod tests {
                     .map(|(name, tool)| (name, tool.tool))
                     .collect(),
             ),
+            None,
         );
         let item = ResponseItem::CustomToolCall {
             id: None,

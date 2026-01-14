@@ -2,6 +2,13 @@
 source: tui/src/chatwidget/tests.rs
 expression: popup
 ---
+Active agent: Default session (session)
+Model: gpt-5 | Tools: inherit parent session
+Switch agents with ":use-agent <id>" or restart with "--use-subagent <id>" (see
+`codex agents list`).
+Inspect transcripts + resume tokens with `codex agents resume-status`.
+
+
   Approaching rate limits
   Switch to gpt-5.1-codex-mini for lower credit usage?
 

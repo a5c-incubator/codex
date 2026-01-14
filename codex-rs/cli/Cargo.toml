@@ -37,9 +37,12 @@ codex-stdio-to-uds = { workspace = true }
 codex-tui = { workspace = true }
 codex-tui2 = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
+codex-subagent = { workspace = true }
+dirs = { workspace = true }
 libc = { workspace = true }
 owo-colors = { workspace = true }
 regex-lite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 supports-color = { workspace = true }
 tokio = { workspace = true, features = [
@@ -61,4 +64,5 @@ assert_matches = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }
+strip-ansi-escapes = { workspace = true }
 tempfile = { workspace = true }

@@ -16,6 +16,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol::SessionConfiguredEvent;
+use codex_core::util::disable_tool_error_panics;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
@@ -138,6 +139,7 @@ impl TestCodexBuilder {
         home: Arc<TempDir>,
         resume_from: Option<PathBuf>,
     ) -> anyhow::Result<TestCodex> {
+        disable_tool_error_panics();
         let auth = self.auth.clone();
         let thread_manager = ThreadManager::with_models_provider_and_home(
             auth.clone(),
@@ -343,21 +345,13 @@ impl TestCodexHarness {
     }
 
     pub async fn function_call_stdout(&self, call_id: &str) -> String {
-        self.function_call_output_value(call_id)
-            .await
-            .get("output")
-            .and_then(Value::as_str)
-            .expect("output string")
-            .to_string()
+        let bodies = self.request_bodies().await;
+        call_output_text(&bodies, call_id, "function_call_output")
     }
 
     pub async fn custom_tool_call_output(&self, call_id: &str) -> String {
         let bodies = self.request_bodies().await;
-        custom_tool_call_output(&bodies, call_id)
-            .get("output")
-            .and_then(Value::as_str)
-            .expect("output string")
-            .to_string()
+        call_output_text(&bodies, call_id, "custom_tool_call_output")
     }
 
     pub async fn apply_patch_output(
@@ -377,26 +371,15 @@ impl TestCodexHarness {
     }
 }
 
-fn custom_tool_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
-    for body in bodies {
-        if let Some(items) = body.get("input").and_then(Value::as_array) {
-            for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("custom_tool_call_output")
-                    && item.get("call_id").and_then(Value::as_str) == Some(call_id)
-                {
-                    return item;
-                }
-            }
-        }
-    }
-    panic!("custom_tool_call_output {call_id} not found");
+fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
+    call_output_by_type(bodies, call_id, "function_call_output")
 }
 
-fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
+fn call_output_by_type<'a>(bodies: &'a [Value], call_id: &str, call_type: &str) -> &'a Value {
     for body in bodies {
         if let Some(items) = body.get("input").and_then(Value::as_array) {
             for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                if item.get("type").and_then(Value::as_str) == Some(call_type)
                     && item.get("call_id").and_then(Value::as_str) == Some(call_id)
                 {
                     return item;
@@ -404,7 +387,35 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
             }
         }
     }
-    panic!("function_call_output {call_id} not found");
+    panic!("{call_type} {call_id} not found");
+}
+
+fn call_output_text(bodies: &[Value], call_id: &str, call_type: &str) -> String {
+    let (content, success) = call_output_content_and_success(bodies, call_id, call_type);
+    content.unwrap_or_else(|| {
+        panic!("{call_type} output {call_id} missing textual content (success={success:?})")
+    })
+}
+
+fn call_output_content_and_success(
+    bodies: &[Value],
+    call_id: &str,
+    call_type: &str,
+) -> (Option<String>, Option<bool>) {
+    let output = call_output_by_type(bodies, call_id, call_type)
+        .get("output")
+        .cloned()
+        .unwrap_or(Value::Null);
+    match output {
+        Value::String(text) => (Some(text), None),
+        Value::Object(obj) => (
+            obj.get("content")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            obj.get("success").and_then(Value::as_bool),
+        ),
+        _ => (None, None),
+    }
 }
 
 pub fn test_codex() -> TestCodexBuilder {

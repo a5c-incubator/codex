@@ -14,6 +14,7 @@ use codex_api::ResponseStream as ApiResponseStream;
 use codex_api::ResponsesClient as ApiResponsesClient;
 use codex_api::ResponsesOptions as ApiResponsesOptions;
 use codex_api::SseTelemetry;
+use codex_api::SubagentsClient as ApiSubagentsClient;
 use codex_api::TransportError;
 use codex_api::common::Reasoning;
 use codex_api::create_text_param_for_request;
@@ -35,9 +36,11 @@ use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
+use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tracing::info;
 use tracing::warn;
 
 use crate::AuthManager;
@@ -56,6 +59,7 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::tools::spec::create_tools_json_for_responses_api;
+use codex_subagent::AgentManifest;
 
 #[derive(Debug, Clone)]
 pub struct ModelClient {
@@ -110,6 +114,60 @@ impl ModelClient {
 
     pub fn provider(&self) -> &ModelProviderInfo {
         &self.provider
+    }
+
+    /// Registers the discovered subagents with the backing model provider.
+    pub async fn register_subagents(&self, manifests: &[AgentManifest]) -> Result<()> {
+        if manifests.is_empty() {
+            return Ok(());
+        }
+
+        let request = build_register_subagents_request(manifests);
+        let payload = Arc::new(serde_json::to_value(&request)?);
+        let extra_headers = beta_feature_headers(&self.config);
+        let manifest_count = manifests.len();
+
+        let auth_manager = self.auth_manager.clone();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(super::auth::AuthManager::unauthorized_recovery);
+
+        loop {
+            let auth = match auth_manager.as_ref() {
+                Some(manager) => manager.auth().await,
+                None => None,
+            };
+            let api_provider = self
+                .provider
+                .to_api_provider(auth.as_ref().map(|a| a.mode))?;
+            let api_auth = auth_provider_from_auth(auth.clone(), &self.provider)?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_telemetry = self.build_request_telemetry();
+            let client = ApiSubagentsClient::new(transport, api_provider, api_auth)
+                .with_telemetry(Some(request_telemetry));
+
+            let result = client
+                .register(payload.clone(), extra_headers.clone())
+                .await;
+
+            match result {
+                Ok(()) => {
+                    info!(
+                        count = manifest_count,
+                        provider = self.provider.name.as_str(),
+                        "registered subagents with model provider"
+                    );
+                    return Ok(());
+                }
+                Err(ApiError::Transport(TransportError::Http { status, .. }))
+                    if status == StatusCode::UNAUTHORIZED =>
+                {
+                    handle_unauthorized(status, &mut auth_recovery).await?;
+                    continue;
+                }
+                Err(err) => return Err(map_api_error(err)),
+            }
+        }
     }
 
     /// Streams a single model turn using either the Responses or Chat
@@ -417,6 +475,37 @@ impl ModelClient {
     }
 }
 
+#[derive(Serialize)]
+struct RegisterSubagentsRequest<'a> {
+    subagents: Vec<RegisterSubagentEntry<'a>>,
+}
+
+#[derive(Serialize)]
+struct RegisterSubagentEntry<'a> {
+    #[serde(flatten)]
+    manifest: &'a AgentManifest,
+    priority: u8,
+    #[serde(rename = "priorityLabel")]
+    priority_label: &'static str,
+}
+
+fn build_register_subagents_request<'a>(
+    manifests: &'a [AgentManifest],
+) -> RegisterSubagentsRequest<'a> {
+    let subagents = manifests
+        .iter()
+        .map(|manifest| {
+            let priority = manifest.priority();
+            RegisterSubagentEntry {
+                manifest,
+                priority: priority as u8,
+                priority_label: priority.label(),
+            }
+        })
+        .collect();
+    RegisterSubagentsRequest { subagents }
+}
+
 /// Adapts the core `Prompt` type into the `codex-api` payload shape.
 fn build_api_prompt(prompt: &Prompt, instructions: String, tools_json: Vec<Value>) -> ApiPrompt {
     ApiPrompt {
@@ -576,5 +665,125 @@ impl SseTelemetry for ApiTelemetry {
         duration: Duration,
     ) {
         self.otel_manager.log_sse_event(result, duration);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_subagent::AgentKind;
+    use codex_subagent::AgentManifest;
+    use codex_subagent::DiscoveryScope;
+    use codex_subagent::HookSet;
+    use codex_subagent::PermissionMode;
+    use codex_subagent::PluginId;
+    use codex_subagent::ToolScope;
+    use codex_subagent::built_in_manifests;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn register_payload_preserves_input_order_and_priority_labels() {
+        let plugin_manifest = manifest_with_scope(
+            "plugin-agent",
+            DiscoveryScope::Plugin {
+                path: PathBuf::from("plugins/plugin-agent.md"),
+                plugin_id: PluginId::new("plugin-agent"),
+            },
+        );
+        let built_in_manifest = built_in_manifests()
+            .into_iter()
+            .next()
+            .expect("built-in manifest available");
+        let manifests = vec![plugin_manifest.clone(), built_in_manifest.clone()];
+        let request = build_register_subagents_request(&manifests);
+        let payload = serde_json::to_value(&request).expect("serialize request");
+
+        let subagents = payload
+            .get("subagents")
+            .and_then(serde_json::Value::as_array)
+            .expect("subagents array present");
+        let ids: Vec<_> = subagents
+            .iter()
+            .map(|entry| entry.get("id").and_then(serde_json::Value::as_str).unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![plugin_manifest.id.as_str(), built_in_manifest.id.as_str()]
+        );
+        let labels: Vec<_> = subagents
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("priorityLabel")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                plugin_manifest.priority().label(),
+                built_in_manifest.priority().label()
+            ]
+        );
+    }
+
+    #[test]
+    fn register_payload_serializes_multiple_manifests() {
+        let project_manifest = manifest_with_scope(
+            "project-agent",
+            DiscoveryScope::Project {
+                path: PathBuf::from(".claude/agents/project-agent.md"),
+            },
+        );
+        let user_manifest = manifest_with_scope(
+            "user-agent",
+            DiscoveryScope::User {
+                path: PathBuf::from("~/.claude/agents/user-agent.md"),
+            },
+        );
+        let manifests = vec![project_manifest.clone(), user_manifest.clone()];
+        let request = build_register_subagents_request(&manifests);
+        let payload = serde_json::to_value(&request).expect("serialize request");
+
+        let expected = json!({
+            "subagents": [
+                manifest_entry(&project_manifest),
+                manifest_entry(&user_manifest),
+            ]
+        });
+        assert_eq!(payload, expected);
+    }
+
+    fn manifest_entry(manifest: &AgentManifest) -> serde_json::Value {
+        let mut value = serde_json::to_value(manifest).expect("serialize manifest");
+        let priority = manifest.priority();
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("priority".to_string(), json!(priority as u8));
+            obj.insert("priorityLabel".to_string(), json!(priority.label()));
+        } else {
+            panic!("manifest should serialize to an object");
+        }
+        value
+    }
+
+    fn manifest_with_scope(id: &str, scope: DiscoveryScope) -> AgentManifest {
+        AgentManifest {
+            id: id.into(),
+            kind: AgentKind::Custom,
+            name: format!("{id} name"),
+            description: format!("{id} description"),
+            model: None,
+            tool_scope: ToolScope::inherit(),
+            permission_mode: PermissionMode::Default,
+            hooks: HookSet::default(),
+            triggers: Vec::new(),
+            skills: Vec::new(),
+            body: format!("{id} body"),
+            source: Some(scope),
+            digest: Some(format!("digest-{id}")),
+        }
     }
 }

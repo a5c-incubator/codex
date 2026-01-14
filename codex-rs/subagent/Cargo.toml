@@ -1,0 +1,27 @@
+[package]
+name = "codex-subagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["schema", "fs-loader"]
+schema = []
+fs-loader = ["schema", "walkdir"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["serde", "json"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
