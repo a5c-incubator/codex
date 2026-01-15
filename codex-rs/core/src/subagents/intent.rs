@@ -266,11 +266,9 @@ mod tests {
             weight: 10,
         }];
         let bravo = manifest("bravo", "Bravo QA");
-        let matched = infer_subagent_from_text(
-            &[alpha, bravo],
-            "Please use the build agent for this task.",
-        )
-        .expect("expected a match");
+        let matched =
+            infer_subagent_from_text(&[alpha, bravo], "Please use the build agent for this task.")
+                .expect("expected a match");
         assert_eq!(matched.agent_id, "alpha");
         assert!(matched.score >= 10);
         assert!(

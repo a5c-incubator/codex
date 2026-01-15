@@ -2068,8 +2068,8 @@ mod handlers {
     use crate::subagents::hooks::HookInvocation;
     use crate::subagents::hooks::HookPhase;
     use crate::subagents::hooks::run_subagent_hooks;
-    use crate::subagents::intent::infer_subagent_from_text;
     use crate::subagents::intent::IntentMatch;
+    use crate::subagents::intent::infer_subagent_from_text;
     use crate::tasks::CompactTask;
     use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
@@ -2085,6 +2085,7 @@ mod handlers {
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
+    use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SkillsListEntry;
     use codex_protocol::protocol::SubagentOverride;
     use codex_protocol::protocol::SubagentOverrideOrigin;
@@ -2547,6 +2548,12 @@ mod handlers {
         if sess.services.active_subagent().await.is_some() {
             return;
         }
+        if session_is_subagent(sess).await {
+            debug!(
+                "automatic subagent activation skipped because session already runs as a subagent"
+            );
+            return;
+        }
         let Some(text) = collect_user_text(items) else {
             return;
         };
@@ -2579,22 +2586,22 @@ mod handlers {
         }
 
         let message = reason.map_or_else(
-            || {
-                format!(
-                    "Switching to {agent_name} ({agent_id}) based on your request."
-                )
-            },
-            |reason| {
-                format!(
-                    "Switching to {agent_name} ({agent_id}) based on {reason}."
-                )
-            },
+            || format!("Switching to {agent_name} ({agent_id}) based on your request."),
+            |reason| format!("Switching to {agent_name} ({agent_id}) based on {reason}."),
         );
         sess.send_event_raw(Event {
             id: sub_id.to_string(),
             msg: EventMsg::Warning(WarningEvent { message }),
         })
         .await;
+    }
+
+    async fn session_is_subagent(sess: &Arc<Session>) -> bool {
+        let state = sess.state.lock().await;
+        matches!(
+            state.session_configuration.session_source,
+            SessionSource::SubAgent(_)
+        )
     }
 
     fn collect_user_text(items: &[UserInput]) -> Option<String> {
