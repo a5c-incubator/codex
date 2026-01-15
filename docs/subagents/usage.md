@@ -74,6 +74,32 @@ codex agents list --json \
 - **Validation errors** (missing fields, YAML typos) show up in `issues` with the file path, matching `RefreshIssue` structs.
 - The TUI `/agents` panel simply shells into the same command, so once the CLI view is clean you can rely on the UI as well.
 
+### Watch for changes
+
+- Run `codex agents list --watch` (with or without `--json`) to subscribe to the same `AgentRegistryWatch` stream the TUI will consume. The CLI now prints an `Override scopes:` header based on `codex_cli::agents_watch`, so inline `--cli-manifest`, file-backed `--cli-manifest-file`, and `--plugin` directories are called out alongside project/user sources.
+- Inline CLI payloads have no filesystem backing, so the loader emits a synthetic watch event on startup to prove that scope exists. File-backed overrides normalize their paths (Windows + Unix) and are monitored for edits, deletes, and re-creations, meaning `--cli-manifest-file` changes retrigger refreshes just like `.claude/agents`.
+- Each refresh still logs `codex.agents_list_invocation` with `watch.scopes` (the paths that changed) plus `watch.overrides` (the CLI/plugin labels under watch), so operators can line up console output with telemetry when debugging.
+
+Example watch session (shows both the JSON stream and the telemetry labels):
+
+```bash
+RUST_LOG=info codex agents list --watch --json \
+  --cli-manifest '{"id":"docs-inline","name":"Inline Docs Agent","body":"Answer with repo docs."}' \
+  --cli-manifest-file $(pwd)/scratch/agent.json \
+  --plugin docs-guides=$(pwd)/plugins/docs-guides/agents
+```
+
+Sample output and log lines:
+
+```text
+Override scopes: cli:cli | cli-file:C:\work\codex\scratch\agent.json | plugin:docs-guides (C:\work\codex\plugins\docs-guides\agents)
+{"event":"refresh","timestamp":"2026-01-15T17:03:11Z","scopes":["initial"],"result":{"status":"success", "summary":{"custom":3,"built_in":4,"duplicates":0},"issues":[]}}
+{"event":"refresh","timestamp":"2026-01-15T17:03:18Z","scopes":["project:C:\work\codex\.claude\agents","cli-file:C:\work\codex\scratch\agent.json"],"result":{"status":"success", "summary":{"custom":3,"built_in":4,"duplicates":0},"issues":[]}}
+INFO codex_cli::agents_cmd > event.name=codex.agents_list_invocation invocation=watch status=success watch.scopes=project:C:\work\codex\.claude\agents,cli-file:C:\work\codex\scratch\agent.json watch.overrides=cli:cli,cli-file:C:\work\codex\scratch\agent.json,plugin:docs-guides (C:\work\codex\plugins\docs-guides\agents)
+```
+
+Use `tail -f ~/.codex/log/codex-cli.log | rg watch.overrides` to verify the telemetry fields without waiting for a JSON event.
+
 ### Inject CLI overrides and plugin manifests
 
 - `codex agents list` (and any `codex exec`/daemon session) accepts inline or file-backed manifests via `--cli-manifest '{"json"}'` and `--cli-manifest-file path/to/manifest.json`. Repeating the flag appends additional overrides; their priority sits between project and user scopes (project > CLI > user > plugin).
@@ -131,6 +157,16 @@ tail -n 20 "$ROLLOUT" | rg SubagentLifecycle
 Alternatively, follow the [telemetry checkpoints](smoke.md#subagentlifecycle-telemetry-checkpoints) to grep the rollout JSONL or TUI log in real time.
 
 Per-agent transcripts are recorded per run under `~/.codex/subagents/<id>/runs/<run_id>/agent-<run_id>.jsonl`. Inspect them directly or run `codex agents resume-status` to list every agent along with each stored run (provider scope, last update, event count, transcript path, and the corresponding resume token).
+
+### Tool-call success metadata
+
+Every function/tool call now includes an `output_metadata.success` flag (see `codex-rs/protocol/src/models.rs` and `codex-rs/core/src/stream_events_utils.rs`). The CLI, TUI, and rollouts all persist this metadata so reviewers can audit tool outcomes without replaying the session. After running a command from step 4, inspect the rollout JSONL:
+
+```bash
+rg '"output_metadata":\{"success":false\}' "$ROLLOUT"
+```
+
+A successful tool call produces `"output_metadata":{"success":true}`. Pair this with `codex.subagent_lifecycle` entries to confirm that denied tool calls (`success:false`) line up with the manifest's tool scope or approval policy.
 
 ## 5. Recover or resume a subagent run
 

@@ -230,7 +230,9 @@ impl<'a> ChatRequestBuilder<'a> {
                     });
                     push_tool_call_message(&mut messages, tool_call, reasoning);
                 }
-                ResponseItem::FunctionCallOutput { call_id, output } => {
+                ResponseItem::FunctionCallOutput {
+                    call_id, output, ..
+                } => {
                     let content_value = if let Some(items) = &output.content_items {
                         let mapped: Vec<Value> = items
                             .iter()
@@ -437,6 +439,7 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-a".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "A".to_string(),
                     ..Default::default()
@@ -444,6 +447,7 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-b".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "B".to_string(),
                     ..Default::default()
@@ -451,6 +455,7 @@ mod tests {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-c".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "C".to_string(),
                     ..Default::default()

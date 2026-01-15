@@ -135,6 +135,67 @@ fn registry_watch_stops_when_handle_is_dropped() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn registry_watch_emits_failure_events() -> Result<()> {
+    let loader = Arc::new(WatchTestLoader::new(vec![test_manifest("alpha")]));
+    let mut registry = AgentRegistry::new(loader.clone());
+    registry.refresh(&[])?;
+    let shared = Arc::new(RwLock::new(registry));
+    let mut watch = AgentRegistry::start_watch(
+        Arc::clone(&shared),
+        vec![dummy_scope()],
+        None,
+        AgentRegistryWatchConfig::default(),
+    )?;
+
+    let scope = dummy_scope();
+    loader.fail_next_refresh(ManifestError::Inline("watch refresh failed".into()));
+    loader.emit(scope.clone());
+
+    let event = wait_for_registry_event(&watch, Duration::from_secs(1))
+        .expect("watch yielded refresh failure");
+    assert_eq!(event.invocation, RefreshInvocation::Watch);
+    assert_eq!(event.scopes, vec![scope]);
+    match event.kind {
+        RegistryEventKind::RefreshFailure { error } => {
+            assert!(
+                error.to_string().contains("watch refresh failed"),
+                "unexpected error: {error}"
+            );
+        }
+        other => panic!("expected refresh failure, got {other:?}"),
+    }
+    assert_eq!(
+        loader.load_count(),
+        1,
+        "failed refresh should not increment successful load count"
+    );
+    watch.close();
+    Ok(())
+}
+
+#[test]
+fn registry_watch_closes_when_registry_is_dropped() -> Result<()> {
+    let loader = Arc::new(WatchTestLoader::new(vec![test_manifest("alpha")]));
+    let mut registry = AgentRegistry::new(loader.clone());
+    registry.refresh(&[])?;
+    let shared = Arc::new(RwLock::new(registry));
+    let watch = AgentRegistry::start_watch(
+        Arc::clone(&shared),
+        vec![dummy_scope()],
+        None,
+        AgentRegistryWatchConfig::default(),
+    )?;
+    drop(shared);
+
+    loader.emit(dummy_scope());
+    assert!(
+        wait_for_watch_closed(&watch, Duration::from_secs(1)),
+        "watch should close once the registry is dropped"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subagent_tool_scope_blocks_disallowed_tools() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -649,6 +710,7 @@ body: |
                 cli_manifests: vec![CliManifestOverride {
                     manifest: cli_manifest,
                     label: Some("inline-cli".into()),
+                    path: None,
                 }],
                 plugin_dirs: vec![PluginDirArg {
                     id: PluginId::new("plugin-source"),
@@ -864,6 +926,7 @@ struct WatchTestLoader {
     manifests: Mutex<Vec<AgentManifest>>,
     load_count: AtomicUsize,
     watch_sender: Mutex<Option<AsyncSender<LoaderEvent>>>,
+    next_error: Mutex<Option<ManifestError>>,
 }
 
 impl WatchTestLoader {
@@ -872,6 +935,7 @@ impl WatchTestLoader {
             manifests: Mutex::new(manifests),
             load_count: AtomicUsize::new(0),
             watch_sender: Mutex::new(None),
+            next_error: Mutex::new(None),
         }
     }
 
@@ -885,10 +949,17 @@ impl WatchTestLoader {
     fn load_count(&self) -> usize {
         self.load_count.load(Ordering::SeqCst)
     }
+
+    fn fail_next_refresh(&self, error: ManifestError) {
+        *self.next_error.lock().expect("next error lock") = Some(error);
+    }
 }
 
 impl ManifestLoader for WatchTestLoader {
     fn load(&self, _targets: &[DiscoveryTarget]) -> Result<LoadOutcome, ManifestError> {
+        if let Some(error) = self.next_error.lock().expect("next error lock").take() {
+            return Err(error);
+        }
         self.load_count.fetch_add(1, Ordering::SeqCst);
         Ok(LoadOutcome {
             manifests: self.manifests.lock().expect("manifest lock").clone(),
@@ -914,6 +985,24 @@ fn wait_for_registry_event(watch: &AgentRegistryWatch, timeout: Duration) -> Opt
                     return None;
                 }
                 thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+fn wait_for_watch_closed(watch: &AgentRegistryWatch, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match watch.try_recv() {
+            Err(AgentRegistryWatchTryRecvError::Closed) => return true,
+            Err(AgentRegistryWatchTryRecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(event) => {
+                panic!("unexpected registry event after drop: {event:?}");
             }
         }
     }

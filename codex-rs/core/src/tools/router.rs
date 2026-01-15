@@ -199,13 +199,15 @@ impl ToolRouter {
                 output: message,
             }
         } else {
+            let output = codex_protocol::models::FunctionCallOutputPayload {
+                content: message,
+                success: Some(false),
+                ..Default::default()
+            };
             ResponseInputItem::FunctionCallOutput {
                 call_id,
-                output: codex_protocol::models::FunctionCallOutputPayload {
-                    content: message,
-                    success: Some(false),
-                    ..Default::default()
-                },
+                output_metadata: output.metadata(),
+                output,
             }
         }
     }

@@ -2068,6 +2068,8 @@ mod handlers {
     use crate::subagents::hooks::HookInvocation;
     use crate::subagents::hooks::HookPhase;
     use crate::subagents::hooks::run_subagent_hooks;
+    use crate::subagents::intent::infer_subagent_from_text;
+    use crate::subagents::intent::IntentMatch;
     use crate::tasks::CompactTask;
     use crate::tasks::RegularTask;
     use crate::tasks::UndoTask;
@@ -2085,6 +2087,7 @@ mod handlers {
     use codex_protocol::protocol::ReviewRequest;
     use codex_protocol::protocol::SkillsListEntry;
     use codex_protocol::protocol::SubagentOverride;
+    use codex_protocol::protocol::SubagentOverrideOrigin;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::WarningEvent;
@@ -2096,6 +2099,7 @@ mod handlers {
     use mcp_types::RequestId;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tracing::debug;
     use tracing::info;
     use tracing::warn;
 
@@ -2513,6 +2517,8 @@ mod handlers {
             _ => unreachable!(),
         };
 
+        auto_delegate_if_needed(sess, &sub_id, &items).await;
+
         let Ok(current_context) = sess.new_turn_with_sub_id(sub_id, updates).await else {
             // new_turn_with_sub_id already emits the error event.
             return;
@@ -2535,6 +2541,88 @@ mod handlers {
                 .await;
             *previous_context = Some(current_context);
         }
+    }
+
+    async fn auto_delegate_if_needed(sess: &Arc<Session>, sub_id: &str, items: &[UserInput]) {
+        if sess.services.active_subagent().await.is_some() {
+            return;
+        }
+        let Some(text) = collect_user_text(items) else {
+            return;
+        };
+        let registry = sess.services.agent_registry.read().await;
+        let manifests = registry.manifests_snapshot();
+        drop(registry);
+        let Some(intent) = infer_subagent_from_text(&manifests, &text) else {
+            return;
+        };
+
+        let IntentMatch {
+            agent_id,
+            agent_name,
+            reason,
+            ..
+        } = intent;
+        let subagent = SubagentOverride::Activate {
+            id: agent_id.clone(),
+            resume: None,
+            origin: Some(SubagentOverrideOrigin::System),
+        };
+
+        if let Err(err) = apply_subagent_override(sess, sub_id, subagent).await {
+            debug!(
+                agent_id = agent_id,
+                error = %err,
+                "automatic subagent activation failed"
+            );
+            return;
+        }
+
+        let message = reason.map_or_else(
+            || {
+                format!(
+                    "Switching to {agent_name} ({agent_id}) based on your request."
+                )
+            },
+            |reason| {
+                format!(
+                    "Switching to {agent_name} ({agent_id}) based on {reason}."
+                )
+            },
+        );
+        sess.send_event_raw(Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::Warning(WarningEvent { message }),
+        })
+        .await;
+    }
+
+    fn collect_user_text(items: &[UserInput]) -> Option<String> {
+        let mut combined = String::new();
+        for item in items {
+            if let UserInput::Text { text } = item {
+                if is_instruction_item(text) {
+                    continue;
+                }
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(text);
+            }
+        }
+        let trimmed = combined.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_owned())
+    }
+
+    fn is_instruction_item(text: &str) -> bool {
+        let trimmed = text.trim_start();
+        trimmed.starts_with("# AGENTS.md instructions")
+            || trimmed.starts_with("# Developer instructions for")
+            || trimmed.contains("<INSTRUCTIONS>")
+            || trimmed.contains("<DEVELOPER_INSTRUCTIONS>")
     }
 
     pub async fn run_user_shell_command(

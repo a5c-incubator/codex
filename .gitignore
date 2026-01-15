@@ -99,3 +99,7 @@ __pycache__/
 # --- end a5c-ai/o install.sh managed ---
 o
 .a5c/**
+work_summaries/
+subagents.html
+subagents.md
+.kanban/format.json

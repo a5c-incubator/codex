@@ -38,6 +38,7 @@ async-stream = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+dunce = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true, features = ["json", "serde"] }

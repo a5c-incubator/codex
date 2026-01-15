@@ -6,7 +6,6 @@ use mcp_types::ContentBlock;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
-use serde::ser::SerializeStruct;
 use serde::ser::Serializer;
 use ts_rs::TS;
 
@@ -44,6 +43,9 @@ pub enum ResponseInputItem {
     FunctionCallOutput {
         call_id: String,
         output: FunctionCallOutputPayload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        output_metadata: Option<FunctionCallOutputMetadata>,
     },
     McpToolCallOutput {
         call_id: String,
@@ -107,12 +109,15 @@ pub enum ResponseItem {
     },
     // NOTE: The input schema for `function_call_output` objects that clients send to the
     // OpenAI /v1/responses endpoint is NOT the same shape as the objects the server returns on the
-    // SSE stream. When *sending* we must wrap the string output inside an object that includes a
-    // required `success` boolean. To ensure we serialize exactly the expected shape we introduce
-    // a dedicated payload struct and flatten it here.
+    // SSE stream. The Responses API only accepts strings or content item arrays for `output`, so we
+    // keep metadata such as `success` in `output_metadata` instead of embedding it inside `output`.
+    // A dedicated payload struct handles the string/array serialization details.
     FunctionCallOutput {
         call_id: String,
         output: FunctionCallOutputPayload,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        output_metadata: Option<FunctionCallOutputMetadata>,
     },
     CustomToolCall {
         #[serde(default, skip_serializing)]
@@ -212,9 +217,15 @@ impl From<ResponseInputItem> for ResponseItem {
                 content,
                 id: None,
             },
-            ResponseInputItem::FunctionCallOutput { call_id, output } => {
-                Self::FunctionCallOutput { call_id, output }
-            }
+            ResponseInputItem::FunctionCallOutput {
+                call_id,
+                output,
+                output_metadata,
+            } => Self::FunctionCallOutput {
+                call_id,
+                output,
+                output_metadata,
+            },
             ResponseInputItem::McpToolCallOutput { call_id, result } => {
                 let output = match result {
                     Ok(result) => FunctionCallOutputPayload::from(&result),
@@ -224,7 +235,11 @@ impl From<ResponseInputItem> for ResponseItem {
                         ..Default::default()
                     },
                 };
-                Self::FunctionCallOutput { call_id, output }
+                Self::FunctionCallOutput {
+                    call_id,
+                    output_metadata: output.metadata(),
+                    output,
+                }
             }
             ResponseInputItem::CustomToolCallOutput { call_id, output } => {
                 Self::CustomToolCallOutput { call_id, output }
@@ -386,6 +401,12 @@ pub enum FunctionCallOutputContentItem {
     InputImage { image_url: String },
 }
 
+/// Out-of-band metadata describing tool execution results.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS, Default)]
+pub struct FunctionCallOutputMetadata {
+    pub success: bool,
+}
+
 /// The payload we send back to OpenAI when reporting a tool call result.
 ///
 /// `content` preserves the historical plain-string payload so downstream
@@ -401,34 +422,33 @@ pub struct FunctionCallOutputPayload {
     pub success: Option<bool>,
 }
 
+impl FunctionCallOutputPayload {
+    pub fn metadata(&self) -> Option<FunctionCallOutputMetadata> {
+        self.success
+            .map(|success| FunctionCallOutputMetadata { success })
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum FunctionCallOutputPayloadSerde {
     Text(String),
     Items(Vec<FunctionCallOutputContentItem>),
+    Object {
+        #[serde(default)]
+        content: Option<String>,
+        #[serde(default)]
+        content_items: Option<Vec<FunctionCallOutputContentItem>>,
+        #[serde(default)]
+        success: Option<bool>,
+    },
 }
 
-// The Responses API expects two *different* shapes depending on success vs failure:
-//   • success → output is a plain string (no nested object)
-//   • failure → output is an object { content, success:false }
 impl Serialize for FunctionCallOutputPayload {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        if let Some(false) = self.success {
-            let mut state = serializer.serialize_struct(
-                "FunctionCallOutputPayload",
-                if self.content_items.is_some() { 3 } else { 2 },
-            )?;
-            state.serialize_field("content", &self.content)?;
-            state.serialize_field("success", &false)?;
-            if let Some(items) = &self.content_items {
-                state.serialize_field("content_items", items)?;
-            }
-            return state.end();
-        }
-
         if let Some(items) = &self.content_items {
             items.serialize(serializer)
         } else {
@@ -455,6 +475,15 @@ impl<'de> Deserialize<'de> for FunctionCallOutputPayload {
                     success: None,
                 })
             }
+            FunctionCallOutputPayloadSerde::Object {
+                content,
+                content_items,
+                success,
+            } => Ok(FunctionCallOutputPayload {
+                content: content.unwrap_or_default(),
+                content_items,
+                success,
+            }),
         }
     }
 }
@@ -573,12 +602,14 @@ mod tests {
 
     #[test]
     fn serializes_success_as_plain_string() -> Result<()> {
+        let output = FunctionCallOutputPayload {
+            content: "ok".into(),
+            ..Default::default()
+        };
         let item = ResponseInputItem::FunctionCallOutput {
             call_id: "call1".into(),
-            output: FunctionCallOutputPayload {
-                content: "ok".into(),
-                ..Default::default()
-            },
+            output_metadata: output.metadata(),
+            output,
         };
 
         let json = serde_json::to_string(&item)?;
@@ -586,26 +617,35 @@ mod tests {
 
         // Success case -> output should be a plain string
         assert_eq!(v.get("output").unwrap().as_str().unwrap(), "ok");
+        assert!(v.get("output_metadata").is_none());
         Ok(())
     }
 
     #[test]
-    fn serializes_failure_as_object() -> Result<()> {
+    fn serializes_failure_as_string() -> Result<()> {
+        let output = FunctionCallOutputPayload {
+            content: "bad".into(),
+            success: Some(false),
+            ..Default::default()
+        };
         let item = ResponseInputItem::FunctionCallOutput {
             call_id: "call1".into(),
-            output: FunctionCallOutputPayload {
-                content: "bad".into(),
-                success: Some(false),
-                ..Default::default()
-            },
+            output_metadata: output.metadata(),
+            output,
         };
 
         let json = serde_json::to_string(&item)?;
         let v: serde_json::Value = serde_json::from_str(&json)?;
 
-        let output = v.get("output").expect("output field");
-        assert_eq!(output.get("content").and_then(Value::as_str), Some("bad"));
-        assert_eq!(output.get("success").and_then(Value::as_bool), Some(false));
+        // Even when `success` is false we still send a plain string because the API only accepts
+        // strings or arrays here.
+        assert_eq!(v.get("output").and_then(Value::as_str), Some("bad"));
+        assert_eq!(
+            v.get("output_metadata")
+                .and_then(|meta| meta.get("success"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
         Ok(())
     }
 
@@ -646,6 +686,7 @@ mod tests {
 
         let item = ResponseInputItem::FunctionCallOutput {
             call_id: "call1".into(),
+            output_metadata: payload.metadata(),
             output: payload,
         };
 
@@ -654,6 +695,12 @@ mod tests {
 
         let output = v.get("output").expect("output field");
         assert!(output.is_array(), "expected array output");
+        assert_eq!(
+            v.get("output_metadata")
+                .and_then(|meta| meta.get("success"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
 
         Ok(())
     }

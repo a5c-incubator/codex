@@ -45,7 +45,7 @@ This document fulfills step 2/8 of `docs/claude-subagent-plan.json` ("Design Arc
 
 | Concern | Owner crate / module | Responsibilities | Success signals |
 | :-- | :-- | :-- | :-- |
-| Manifest discovery & schema | `codex-config::subagents::{fs_loader, schema}` | Watch `.claude/agents`, CLI overrides (`--cli-manifest`, `--cli-manifest-file`), `~/.claude/agents`, and plugin `agents/` in priority order; parse YAML front matter + Markdown body; emit provenance & digests for cache invalidation. | Loader emits `AgentManifest` structs sorted by `DiscoveryPriority`, exposes watcher events for CLI hot reloads, and validates against schema errors before runtime. |
+| Manifest discovery & schema | `codex-config::subagents::{fs_loader, schema}` | Watch `.claude/agents`, CLI overrides (`--cli-manifest`, `--cli-manifest-file`), `~/.claude/agents`, and plugin `agents/` in priority order; parse YAML front matter + Markdown body; emit provenance & digests for cache invalidation. Inline CLI payloads raise a synthetic watch event so CLI/TUI subscribers know the override scope exists, and `--cli-manifest-file` paths are normalized so edits/deletes retrigger refreshes on every platform. | Loader emits `AgentManifest` structs sorted by `DiscoveryPriority`, exposes watcher events for CLI hot reloads, and validates against schema errors before runtime. |
 | CLI management & UX | `codex-cli::commands::agents`, shared output structs for TUI/VS Code | Provide `/agents` CRUD, `codex agents list --json`, and override flags (`--cli-manifest`, `--cli-manifest-file`, `--plugin`) so reviewers can inject manifests, inspect validation output, and feed JSON to downstream surfaces. | Users can list/preview priority resolution, apply CLI overrides without touching disk, and TUI/VS Code can shell out to the same command. |
 | Registry & lifecycle | `codex-core::agent::{registry, runtime, hooks}`, `codex-core::codex_delegate` | Merge manifests, dedupe by priority, hydrate built-ins, register with Claude's `register_subagents`, and mint `AgentRuntimeProfile`s stored in `SessionServices`. | Registry refresh runs before first Claude turn and the shared `AgentRegistryWatch` now refreshes automatically whenever loader events arrive; each `agentId` maps to `SessionSource::SubAgent(SubAgentSource::Custom(_))` without duplicates. |
 | Permission & tool gating | `codex-core::state::service::SessionServices`, `codex-core::tools::orchestrator`, approval plumbing | Apply `PermissionResolver` + `ToolScopeFilter`, carry hooks (Pre/Post/Stop) into tool execution, and ensure approvals respect per-agent policy. | Tool prompts only show filtered descriptors, approvals reflect manifest `permissionMode`, and hooks fire with structured payloads around orchestrator invocations. |
@@ -80,6 +80,14 @@ pub struct AgentManifest {
 ```
 
 `ManifestLoader: Send + Sync` exposes `load(scope) -> Result<LoadOutcome, ManifestError>` where `LoadOutcome` bundles the parsed manifests plus any validation issues (path + scope + message). `watch(scopes)` returns a `LoaderWatch` that feeds `AgentRegistryWatch`, which debounces file changes and triggers telemetry-aware refreshes for CLI/TUI callers. A helper `DiscoveryPriority::cmp` enforces project > CLI override > user > plugin ordering.
+
+### Watch mode & override scopes
+
+- `FsManifestLoader::watch` canonicalizes every `--cli-manifest-file` path (`DiscoveryTarget::CliManifestFile`) and registers per-plugin recursive watchers so the CLI and upcoming TUI subscriber receive the same events the registry sees. Inline `--cli-manifest` payloads are synthetic, so the loader emits a one-time watch event for them on startup to ensure downstream consumers list the override scope.
+- `codex_cli::agents_watch` (see `codex-rs/cli/src/agents_watch.rs`) centralizes bootstrap logic for `codex agents list --watch` and the TUI. It collects `override_scope_labels` such as `cli:cli`, `cli-file:C:\repo\scratch\agent.json`, and `plugin:docs-guides (plugins/docs-guides/agents)`, renders them in the CLI header, and injects the labels into telemetry via `watch.overrides`.
+- Each refresh includes the affected discovery targets (`watch_scope_labels` like `project:C:\repo\.claude\agents`) so operators can correlate console output with the logged `watch.scopes` field.
+- The shared helper exposes the initial `RefreshOutcome`, manifests, and built-in IDs so the CLI, TUI, and any tooling that shells into `codex agents list --watch --json` render identical summaries.
+
 
 ### Registry & runtime profiles
 
@@ -175,7 +183,7 @@ flowchart TD
 
 Narrative:
 
-1. **Discovery** â€” `ManifestLoader` polls/watches project, CLI JSON, user, and plugin scopes in priority order, tagging every manifest with its provenance and digest.
+1. **Discovery** - `ManifestLoader` polls/watches project, CLI JSON, CLI manifest files, user, and plugin scopes in priority order, tagging every manifest with its provenance and digest while emitting watch metadata (`project:...`, `cli:...`, `cli-file:...`, `plugin:...`).
 2. **Registry refresh** â€” `AgentRegistry` dedupes by `AgentId`, hydrates built-in profiles, and executes `ModelClient::register_agents` so Claude receives `agentId` mappings before the first turn.
 3. **CLI/TUI surfacing** â€” The `/agents` command (and TUI shell-out) calls the registry to render current manifests, errors, and effective priorities, enabling users to test overrides.
 4. **Activation** â€” When Claude instructs Codex to run an agent, `codex-core::codex_delegate::run_subagent` clones the parent `SessionServices`, applies the `AgentRuntimeProfile`, stamps `SessionSource::SubAgent`, and feeds prompts/models into `ModelClient`.
@@ -194,6 +202,8 @@ Reviewers validating Step-5 can follow `docs/subagents/smoke.md#subagentlifecycl
 - `codex-core` emits `EventMsg::SubagentLifecycle` (and the mirrored `codex.subagent_lifecycle` OTEL row) whenever a runtime is activated or cleared. Each payload contains the phase (`activated`/`stopped`), manifest id + digest, the effective approval and sandbox policies, and the current rollout/resume token so auditors can reconstruct the session state.
 - The daemon/app-server flow uses the new `turn/start.subagent` and `sendUserTurn.subagent` fields to activate manifests before the first turn, and automatically submits `SubagentOverride::Clear` during shutdown so stop hooks always fire and a `stopped` lifecycle event is recorded.
 - Hook payloads now include both the `sandbox_policy` in effect and the manifest-driven `approval_policy`, ensuring downstream HTTP/command hooks receive the same gating context that Codex applied locally.
+- `codex.agents_list_invocation` (the CLI/TUI companion log) mirrors the registry counts, captures the scopes that triggered each refresh, and now emits both `watch.scopes` (for example, `project:C:\repo\.claude\agents,cli-file:C:\repo\scratch\agent.json`) and `watch.overrides` (for example, `cli:cli,cli-file:C:\repo\scratch\agent.json,plugin:docs-guides (plugins/docs-guides/agents)`) so override activity is auditable alongside project/user changes. These fields originate in `codex_cli::agents_watch` and match the banner shown by `codex agents list --watch`.
+- Tool-call telemetry now includes the `output_metadata.success` channel defined in `codex-rs/protocol/src/models.rs`. `stream_events_utils::response_input_to_response_item` writes the flag into every `FunctionCallOutput` item (both the user-facing SSE stream and the persisted transcript), enabling reviewers to grep rollout JSONL files for successful vs. failed tool executions even when a tool returns structured output.
 
 ## Built-in parity matrix
 
@@ -208,7 +218,8 @@ Built-ins live as manifests in `codex-config::subagents::builtins`, allowing loc
 
 ## Persistence & resume strategy
 
-* **Storage layout** — Each agent gets a namespace under ~/.codex/subagents/<agent_id>/runs/<run_id>/ where we stream gent-<run_id>.jsonl, drop a run-scoped esume.token, and keep an agent-level index.json so CLI/TUI surfaces can list runs quickly.
+* **Storage layout** — Each agent gets a namespace under ~/.codex/subagents/<agent_id>/runs/<run_id>/ where we stream gent-<run_id>.jsonl, drop a run-scoped 
+esume.token, and keep an agent-level index.json so CLI/TUI surfaces can list runs quickly.
 * **Writers** — TranscriptStore::writer wraps codex-core::rollout::Recorder so JSONL entries reuse the same schema and instrumentation already ingested by telemetry.
 * **Resume tokens** — ppend_resume_token writes both to disk (for Claude) and returns a lightweight struct for CLI surfaces. Tokens capture the 	hread_id and last event_offset so resumed sessions can truncate duplicated events safely, and they’re exposed via codex agents resume-status for human operators.
 * **Lookup** — lookup_resume verifies that requested tokens exist, rehydrates manifests via AgentRegistry, reloads the transcript, and reconstructs AgentRuntimeProfiles so approvals, hook sets, and tool scopes stay aligned with the original run.
@@ -225,7 +236,7 @@ Built-ins live as manifests in `codex-config::subagents::builtins`, allowing loc
 
 ## Open questions & follow-ups
 
-1. **Manifest watcher ergonomics** â€” Registry-side plumbing now lives in `AgentRegistryWatch` (debounced + telemetry); remaining work is wiring the CLI/TUI surfaces to opt into the shared handle.
+1. **Manifest watcher ergonomics** ? `AgentRegistryWatch` now streams scopes for every discovery target, including per-plugin directories, normalized `--cli-manifest-file` paths, and inline `--cli-manifest` payloads (synthetic events on startup). `codex_cli::agents_watch` records these override labels so `codex agents list --watch` (and the upcoming TUI subscriber) can show which CLI/plugin source triggered a refresh.
 2. **Permission resolver mapping** â€” Validate that each Claude `permissionMode` aligns with `AskForApproval` semantics, specifically how `plan` and `bypassPermissions` interact with sandbox policies.
 3. **Hook payload schema tests** â€” Resolved via the insta snapshots in `codex-rs/core/src/subagents/hooks.rs` (covering `PreToolUse` and `PostToolUse`) plus the registry/CLI regression tests (`codex-rs/core/tests/suite/subagents.rs`, `codex-rs/cli/tests/agents_list.rs`) that prove validation issues surface alongside successful registrations.
 4. **Resume index format** â€” Finalize whether `index.json` should include per-agent metadata for quick CLI rendering or rely solely on directory scanning.

@@ -176,6 +176,7 @@ fn remove_first_item_removes_matching_output_for_function_call() {
         },
         ResponseItem::FunctionCallOutput {
             call_id: "call-1".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "ok".to_string(),
                 ..Default::default()
@@ -192,6 +193,7 @@ fn remove_first_item_removes_matching_call_for_output() {
     let items = vec![
         ResponseItem::FunctionCallOutput {
             call_id: "call-2".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "ok".to_string(),
                 ..Default::default()
@@ -226,6 +228,7 @@ fn remove_first_item_handles_local_shell_pair() {
         },
         ResponseItem::FunctionCallOutput {
             call_id: "call-3".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "ok".to_string(),
                 ..Default::default()
@@ -395,6 +398,7 @@ fn normalization_retains_local_shell_outputs() {
         },
         ResponseItem::FunctionCallOutput {
             call_id: "shell-1".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "Total output lines: 1\n\nok".to_string(),
                 ..Default::default()
@@ -417,6 +421,7 @@ fn record_items_truncates_function_call_output_content() {
     let long_output = long_line.repeat(2_500);
     let item = ResponseItem::FunctionCallOutput {
         call_id: "call-100".to_string(),
+        output_metadata: None,
         output: FunctionCallOutputPayload {
             content: long_output.clone(),
             success: Some(true),
@@ -482,6 +487,7 @@ fn record_items_respects_custom_token_limit() {
     let long_output = "tokenized content repeated many times ".repeat(200);
     let item = ResponseItem::FunctionCallOutput {
         call_id: "call-custom-limit".to_string(),
+        output_metadata: None,
         output: FunctionCallOutputPayload {
             content: long_output,
             success: Some(true),
@@ -617,6 +623,7 @@ fn normalize_adds_missing_output_for_function_call() {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-x".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     ..Default::default()
@@ -694,6 +701,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id() {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "shell-1".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     ..Default::default()
@@ -748,6 +756,7 @@ fn normalize_mixed_inserts_and_removals() {
         // Orphan output that should be removed
         ResponseItem::FunctionCallOutput {
             call_id: "c2".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "ok".to_string(),
                 ..Default::default()
@@ -790,6 +799,7 @@ fn normalize_mixed_inserts_and_removals() {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "c1".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     ..Default::default()
@@ -820,6 +830,7 @@ fn normalize_mixed_inserts_and_removals() {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "s1".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     ..Default::default()
@@ -850,6 +861,7 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-x".to_string(),
+                output_metadata: None,
                 output: FunctionCallOutputPayload {
                     content: "aborted".to_string(),
                     ..Default::default()
@@ -900,6 +912,7 @@ fn normalize_adds_missing_output_for_local_shell_call_with_id_panics_in_debug() 
 fn normalize_removes_orphan_function_call_output_panics_in_debug() {
     let items = vec![ResponseItem::FunctionCallOutput {
         call_id: "orphan-1".to_string(),
+        output_metadata: None,
         output: FunctionCallOutputPayload {
             content: "ok".to_string(),
             ..Default::default()
@@ -934,6 +947,7 @@ fn normalize_mixed_inserts_and_removals_panics_in_debug() {
         },
         ResponseItem::FunctionCallOutput {
             call_id: "c2".to_string(),
+            output_metadata: None,
             output: FunctionCallOutputPayload {
                 content: "ok".to_string(),
                 ..Default::default()

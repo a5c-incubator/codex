@@ -446,6 +446,10 @@ pub enum RefreshInvocation {
     CliListJson,
     /// `codex agents list` without `--json`.
     CliListHuman,
+    /// `codex agents list --watch` (human output).
+    CliListWatchHuman,
+    /// `codex agents list --json --watch`.
+    CliListWatchJson,
     /// Pre-flight validation (e.g., `--use-subagent` flag).
     EnsureAvailable,
     /// Watch-triggered refresh.
@@ -461,6 +465,8 @@ impl RefreshInvocation {
             Self::SessionStartup => "session_startup",
             Self::CliListJson => "cli_list_json",
             Self::CliListHuman => "cli_list_human",
+            Self::CliListWatchHuman => "cli_list_watch_human",
+            Self::CliListWatchJson => "cli_list_watch_json",
             Self::EnsureAvailable => "ensure_available",
             Self::Watch => "watch",
             Self::Unknown => "unknown",
@@ -902,6 +908,9 @@ fn scope_label(scope: &DiscoveryTarget) -> String {
         DiscoveryTarget::PluginDir { plugin, .. } => format!("plugin:{}", plugin.as_str()),
         DiscoveryTarget::CliJson { label, .. } => {
             format!("cli:{}", label.as_deref().unwrap_or("inline"))
+        }
+        DiscoveryTarget::CliManifestFile { path, .. } => {
+            format!("cli-file:{}", path.display())
         }
     }
 }

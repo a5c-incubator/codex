@@ -10,34 +10,48 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
+use chrono::Local;
+use chrono::Utc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use codex_core::TranscriptIndex;
 use codex_core::TranscriptRunSummary;
 use codex_core::agent::AgentRegistry;
+use codex_core::agent::AgentRegistryWatchConfig;
+use codex_core::agent::AgentRegistryWatchTryRecvError;
 use codex_core::agent::RefreshInvocation;
 use codex_core::agent::RefreshIssue;
 use codex_core::agent::RefreshOutcome;
 use codex_core::agent::RefreshReport;
+use codex_core::agent::RegistryEventKind;
 use codex_core::config::find_codex_home;
 use codex_exec::subagent_args::DiscoveryTargetArgs;
 use codex_exec::subagent_args::PluginDirArg;
 use codex_exec::subagent_args::SubagentOverrideInput;
-use codex_exec::subagent_args::build_discovery_targets;
 use codex_exec::subagent_args::parse_plugin_dir;
 use codex_exec::subagent_args::parse_subagent_overrides;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_subagent::DiscoveryScope;
-use codex_subagent::FsManifestLoader;
-use codex_subagent::ManifestLoader;
+use codex_subagent::DiscoveryTarget;
+use codex_subagent::ManifestError;
 use codex_subagent::PermissionMode;
 use owo_colors::OwoColorize;
 use serde::Serialize;
+
+use codex_cli::agents_watch::AgentsWatchBootstrap;
+use codex_cli::agents_watch::bootstrap_agents_watch;
 
 /// Entry point for `codex agents ...`.
 #[derive(Debug, Parser)]
@@ -60,6 +74,14 @@ struct AgentsListArgs {
     /// Output JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
+
+    /// Continuously watch manifest sources and rerender results on change.
+    #[arg(long)]
+    watch: bool,
+
+    /// Override the watcher debounce window in milliseconds (advanced).
+    #[arg(long = "watch-debounce-ms", value_name = "MILLIS")]
+    watch_debounce_ms: Option<u64>,
 
     /// Override the project-level manifest directory (defaults to ./\.claude/agents).
     #[arg(long)]
@@ -98,59 +120,325 @@ pub fn run(cli: AgentsCli) -> Result<()> {
 }
 
 fn list_agents(args: AgentsListArgs) -> Result<()> {
+    if args.watch_debounce_ms.is_some() && !args.watch {
+        bail!("--watch-debounce-ms requires --watch");
+    }
+
     let cwd = env::current_dir()?;
     let overrides = parse_subagent_overrides(&SubagentOverrideInput {
         cli_manifests: &args.cli_manifest,
         cli_manifest_files: &args.cli_manifest_file,
         plugin_dirs: &args.plugin_dirs,
     })?;
-    let targets = build_discovery_targets(&DiscoveryTargetArgs {
+    let discovery_args = DiscoveryTargetArgs {
         cwd: &cwd,
         project_dir_override: args.project_dir.as_deref(),
         user_dir_override: args.user_dir.as_deref(),
         overrides: &overrides,
-    })?;
-    let missing_sources = targets.is_empty();
-    let loader: Arc<dyn ManifestLoader> = Arc::new(FsManifestLoader::new());
-    let mut registry = AgentRegistry::new(loader);
+    };
     let invocation = if args.json {
         RefreshInvocation::CliListJson
     } else {
         RefreshInvocation::CliListHuman
     };
-    let outcome = match registry.refresh_with_telemetry(&targets, None, invocation) {
-        Ok(outcome) => {
-            log_agents_list_invocation(invocation, &outcome.report, &outcome.issues);
-            outcome
-        }
+    let bootstrap = match bootstrap_agents_watch(discovery_args, invocation) {
+        Ok(bootstrap) => bootstrap,
         Err(err) => {
             let message = err.to_string();
-            log_agents_list_failure(invocation, &message);
-            return Err(err.into());
+            log_agents_list_failure(invocation, &message, None, &[]);
+            return Err(err);
         }
     };
+    let registry = bootstrap.registry();
+    let outcome = bootstrap.outcome();
+    log_agents_list_invocation(
+        invocation,
+        &outcome.report,
+        &outcome.issues,
+        None,
+        bootstrap.override_scope_labels(),
+    );
 
-    let built_in_ids = built_in_manifest_ids(&registry);
+    render_initial_listing(&args, &bootstrap, &registry)?;
 
+    if !args.watch {
+        return Ok(());
+    }
+
+    run_watch_loop(&args, bootstrap)
+}
+
+fn render_initial_listing(
+    args: &AgentsListArgs,
+    bootstrap: &AgentsWatchBootstrap,
+    registry: &Arc<RwLock<AgentRegistry>>,
+) -> Result<()> {
+    let outcome = bootstrap.outcome();
     if args.json {
-        print_json(&registry, &outcome)?;
+        if args.watch {
+            emit_json_watch_success(registry, outcome, bootstrap.discovery_targets())?;
+        } else {
+            with_registry(registry, |guard| print_json(guard, outcome))?;
+        }
         eprint_issues(&outcome.issues);
-        if missing_sources {
-            emit_builtin_hint(&built_in_ids, |line| eprintln!("{line}"));
+        if bootstrap.missing_sources() {
+            emit_builtin_hint(bootstrap.built_in_ids(), |line| eprintln!("{line}"));
         }
         return Ok(());
     }
 
-    if missing_sources {
-        emit_builtin_hint(&built_in_ids, |line| println!("{line}"));
+    if bootstrap.missing_sources() {
+        emit_builtin_hint(bootstrap.built_in_ids(), |line| println!("{line}"));
     }
-
-    let manifests: Vec<_> = registry.manifests().collect();
+    let manifests = snapshot_manifests(registry)?;
     print_builtin_summary(&manifests);
     print_human(&manifests);
     print_issues(&outcome.issues);
     print_summary(&outcome.report);
     Ok(())
+}
+
+fn run_watch_loop(args: &AgentsListArgs, bootstrap: AgentsWatchBootstrap) -> Result<()> {
+    let mut config = AgentRegistryWatchConfig::default();
+    if let Some(ms) = args.watch_debounce_ms {
+        config.debounce = Duration::from_millis(ms);
+    }
+    let mut watch = match bootstrap.start_watch(config) {
+        Ok(handle) => handle,
+        Err(ManifestError::WatchUnsupported) => {
+            let guidance =
+                "Manifest watching is not supported on this platform; rerun without --watch.";
+            if args.json {
+                eprintln!("{guidance}");
+            } else {
+                println!("{guidance}");
+            }
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let registry = bootstrap.registry();
+    let built_in_ids = bootstrap.built_in_ids().to_vec();
+    let missing_sources = bootstrap.missing_sources();
+    let override_scope_labels = bootstrap.override_scope_labels().to_vec();
+    let watch_invocation = if args.json {
+        RefreshInvocation::CliListWatchJson
+    } else {
+        RefreshInvocation::CliListWatchHuman
+    };
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&interrupted);
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        })?;
+    }
+
+    emit_watch_start_notice(args.json, &override_scope_labels);
+
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            break;
+        }
+        match watch.try_recv() {
+            Ok(event) => match event.kind {
+                RegistryEventKind::RefreshSuccess { outcome } => {
+                    log_agents_list_invocation(
+                        watch_invocation,
+                        &outcome.report,
+                        &outcome.issues,
+                        Some(&event.scopes),
+                        &override_scope_labels,
+                    );
+                    if args.json {
+                        emit_json_watch_success(&registry, &outcome, &event.scopes)?;
+                        eprint_issues(&outcome.issues);
+                    } else {
+                        render_watch_success(
+                            &registry,
+                            &outcome,
+                            &event.scopes,
+                            missing_sources,
+                            &built_in_ids,
+                        )?;
+                    }
+                }
+                RegistryEventKind::RefreshFailure { error } => {
+                    let message = error.to_string();
+                    log_agents_list_failure(
+                        watch_invocation,
+                        &message,
+                        Some(&event.scopes),
+                        &override_scope_labels,
+                    );
+                    if args.json {
+                        emit_json_watch_failure(&event.scopes, &message)?;
+                    } else {
+                        render_watch_failure(&event.scopes, &message);
+                    }
+                }
+            },
+            Err(AgentRegistryWatchTryRecvError::Empty) => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(AgentRegistryWatchTryRecvError::Closed) => break,
+        }
+    }
+
+    watch.close();
+    Ok(())
+}
+
+fn emit_watch_start_notice(json: bool, override_scopes: &[String]) {
+    let message = "Watching subagent manifests for changes. Press Ctrl+C to stop.";
+    if json {
+        eprintln!("{}", message.dimmed());
+    } else {
+        println!("{}", message.dimmed());
+    }
+    if override_scopes.is_empty() {
+        return;
+    }
+    let detail = format!("Override scopes: {}.", override_scopes.join(", "));
+    if json {
+        eprintln!("{}", detail.dimmed());
+    } else {
+        println!("{}", detail.dimmed());
+    }
+}
+
+fn render_watch_success(
+    registry: &Arc<RwLock<AgentRegistry>>,
+    outcome: &RefreshOutcome,
+    scopes: &[DiscoveryTarget],
+    missing_sources: bool,
+    built_in_ids: &[String],
+) -> Result<()> {
+    println!();
+    let header = format!(
+        "[{}] refresh success ({})",
+        now_timestamp_local(),
+        watch_scope_summary(scopes)
+    );
+    println!("{}", header.green());
+    if missing_sources {
+        emit_builtin_hint(built_in_ids, |line| println!("{line}"));
+    }
+    let manifests = snapshot_manifests(registry)?;
+    print_builtin_summary(&manifests);
+    print_human(&manifests);
+    print_issues(&outcome.issues);
+    print_summary(&outcome.report);
+    Ok(())
+}
+
+fn render_watch_failure(scopes: &[DiscoveryTarget], error: &str) {
+    println!();
+    let header = format!(
+        "[{}] refresh failed ({})",
+        now_timestamp_local(),
+        watch_scope_summary(scopes)
+    );
+    println!("{}", header.red());
+    println!("  {error}");
+    if !scopes.is_empty() {
+        println!(
+            "  {}",
+            "Fix the manifest in the listed scopes and save again to retry.".dimmed()
+        );
+    }
+}
+
+fn emit_json_watch_success(
+    registry: &Arc<RwLock<AgentRegistry>>,
+    outcome: &RefreshOutcome,
+    scopes: &[DiscoveryTarget],
+) -> Result<()> {
+    let payload = with_registry(registry, |guard| Ok(build_agents_list_json(guard, outcome)))?;
+    let event = JsonWatchEvent {
+        event: "refresh",
+        timestamp: now_timestamp_utc(),
+        scopes: watch_scope_labels(scopes),
+        result: JsonWatchResult::Success {
+            manifests: payload.manifests,
+            summary: payload.summary,
+            issues: payload.issues,
+        },
+    };
+    println!("{}", serde_json::to_string(&event)?);
+    Ok(())
+}
+
+fn emit_json_watch_failure(scopes: &[DiscoveryTarget], error: &str) -> Result<()> {
+    let event = JsonWatchEvent {
+        event: "refresh",
+        timestamp: now_timestamp_utc(),
+        scopes: watch_scope_labels(scopes),
+        result: JsonWatchResult::Failure {
+            error: error.to_string(),
+        },
+    };
+    println!("{}", serde_json::to_string(&event)?);
+    Ok(())
+}
+
+fn watch_scope_labels(scopes: &[DiscoveryTarget]) -> Vec<String> {
+    if scopes.is_empty() {
+        return vec!["initial".into()];
+    }
+    scopes.iter().map(describe_target).collect()
+}
+
+fn watch_scope_summary(scopes: &[DiscoveryTarget]) -> String {
+    if scopes.is_empty() {
+        "scopes: none".into()
+    } else {
+        format!("scopes: {}", watch_scope_labels(scopes).join(", "))
+    }
+}
+
+fn describe_target(scope: &DiscoveryTarget) -> String {
+    match scope {
+        DiscoveryTarget::ProjectDir(path) => format!("project:{}", path.display()),
+        DiscoveryTarget::UserDir(path) => format!("user:{}", path.display()),
+        DiscoveryTarget::PluginDir { path, plugin } => {
+            format!("plugin:{} ({})", plugin.as_str(), path.display())
+        }
+        DiscoveryTarget::CliJson { label, .. } => {
+            format!("cli:{}", label.as_deref().unwrap_or("inline"))
+        }
+        DiscoveryTarget::CliManifestFile { path, .. } => {
+            format!("cli-file:{}", path.display())
+        }
+    }
+}
+
+fn snapshot_manifests(
+    registry: &Arc<RwLock<AgentRegistry>>,
+) -> Result<Vec<Arc<codex_subagent::AgentManifest>>> {
+    let guard = registry
+        .read()
+        .map_err(|_| anyhow!("agent registry lock poisoned"))?;
+    Ok(guard.manifests().collect())
+}
+
+fn with_registry<T, F>(registry: &Arc<RwLock<AgentRegistry>>, func: F) -> Result<T>
+where
+    F: FnOnce(&AgentRegistry) -> Result<T>,
+{
+    let guard = registry
+        .read()
+        .map_err(|_| anyhow!("agent registry lock poisoned"))?;
+    func(&guard)
+}
+
+fn now_timestamp_local() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn now_timestamp_utc() -> String {
+    Utc::now().to_rfc3339()
 }
 
 fn resume_status(args: AgentsResumeStatusArgs) -> Result<()> {
@@ -422,22 +710,6 @@ fn print_summary(report: &RefreshReport) {
     );
 }
 
-fn built_in_manifest_ids(registry: &AgentRegistry) -> Vec<String> {
-    registry
-        .manifests()
-        .filter_map(|manifest| {
-            if matches!(
-                manifest.source.as_ref(),
-                Some(DiscoveryScope::BuiltIn { .. })
-            ) {
-                Some(manifest.id.as_str().to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn emit_builtin_hint<F>(built_in_ids: &[String], mut emit: F)
 where
     F: FnMut(String),
@@ -484,7 +756,13 @@ fn log_agents_list_invocation(
     invocation: RefreshInvocation,
     report: &RefreshReport,
     issues: &[RefreshIssue],
+    scopes: Option<&[DiscoveryTarget]>,
+    override_scopes: &[String],
 ) {
+    let watch_scopes = scopes
+        .map(|scopes| watch_scope_labels(scopes).join(","))
+        .unwrap_or_default();
+    let override_labels = override_scopes.join(",");
     let scopes = report.scope_breakdown;
     tracing::event!(
         tracing::Level::INFO,
@@ -501,17 +779,30 @@ fn log_agents_list_invocation(
         scope.plugin = scopes.plugin,
         scope.built_in = scopes.built_in,
         scope.unknown = scopes.unknown,
+        watch.scopes = watch_scopes.as_str(),
+        watch.overrides = override_labels.as_str(),
         issues = issues.len(),
     );
 }
 
-fn log_agents_list_failure(invocation: RefreshInvocation, error: &str) {
+fn log_agents_list_failure(
+    invocation: RefreshInvocation,
+    error: &str,
+    scopes: Option<&[DiscoveryTarget]>,
+    override_scopes: &[String],
+) {
+    let watch_scopes = scopes
+        .map(|scopes| watch_scope_labels(scopes).join(","))
+        .unwrap_or_default();
+    let override_labels = override_scopes.join(",");
     tracing::event!(
         tracing::Level::WARN,
         event.name = "codex.agents_list_invocation",
         invocation = invocation.as_str(),
         status = "error",
         error.message = error,
+        watch.scopes = watch_scopes.as_str(),
+        watch.overrides = override_labels.as_str(),
     );
 }
 
@@ -537,53 +828,124 @@ fn trigger_label(trigger: &codex_subagent::TriggerDefinition) -> String {
     }
 }
 
-fn print_json(registry: &AgentRegistry, outcome: &RefreshOutcome) -> Result<()> {
-    #[derive(Serialize)]
-    struct AgentsListJson {
+#[derive(Serialize)]
+struct AgentsListJson {
+    manifests: Vec<codex_subagent::AgentManifest>,
+    summary: JsonSummary,
+    issues: Vec<JsonIssue>,
+}
+
+#[derive(Serialize)]
+struct JsonSummary {
+    custom: usize,
+    built_in: usize,
+    duplicates: usize,
+}
+
+#[derive(Serialize)]
+struct JsonIssue {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct JsonWatchEvent {
+    event: &'static str,
+    timestamp: String,
+    scopes: Vec<String>,
+    #[serde(flatten)]
+    result: JsonWatchResult,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum JsonWatchResult {
+    Success {
         manifests: Vec<codex_subagent::AgentManifest>,
         summary: JsonSummary,
         issues: Vec<JsonIssue>,
-    }
+    },
+    Failure {
+        error: String,
+    },
+}
 
-    #[derive(Serialize)]
-    struct JsonSummary {
-        custom: usize,
-        built_in: usize,
-        duplicates: usize,
-    }
+fn print_json(registry: &AgentRegistry, outcome: &RefreshOutcome) -> Result<()> {
+    let payload = build_agents_list_json(registry, outcome);
+    let json = serde_json::to_string_pretty(&payload)?;
+    println!("{json}");
+    Ok(())
+}
 
-    #[derive(Serialize)]
-    struct JsonIssue {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        message: String,
-    }
-
+fn build_agents_list_json(registry: &AgentRegistry, outcome: &RefreshOutcome) -> AgentsListJson {
     let manifests: Vec<_> = registry
         .manifests()
         .map(|manifest| (*manifest).clone())
         .collect();
     let report = outcome.report;
-    let payload = AgentsListJson {
-        manifests,
-        summary: JsonSummary {
-            custom: report.custom_manifests(),
-            built_in: report.built_in_manifests,
-            duplicates: report.skipped_duplicates,
-        },
-        issues: outcome
-            .issues
-            .iter()
-            .map(|issue| JsonIssue {
-                path: issue.path_label(),
-                scope: issue.scope_label(),
-                message: issue.message.clone(),
-            })
-            .collect(),
+    let summary = JsonSummary {
+        custom: report.custom_manifests(),
+        built_in: report.built_in_manifests,
+        duplicates: report.skipped_duplicates,
     };
-    let json = serde_json::to_string_pretty(&payload)?;
-    println!("{json}");
-    Ok(())
+    let issues = outcome
+        .issues
+        .iter()
+        .map(|issue| JsonIssue {
+            path: issue.path_label(),
+            scope: issue.scope_label(),
+            message: issue.message.clone(),
+        })
+        .collect();
+    AgentsListJson {
+        manifests,
+        summary,
+        issues,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use serde_json::json;
+
+    #[test]
+    fn agents_list_watch_flags_parse() {
+        let cli = AgentsCli::try_parse_from([
+            "codex-agents",
+            "list",
+            "--watch",
+            "--watch-debounce-ms",
+            "25",
+        ])
+        .expect("parse agents list");
+        match cli.command {
+            AgentsSubcommand::List(args) => {
+                assert!(args.watch);
+                assert_eq!(args.watch_debounce_ms, Some(25));
+            }
+            other => panic!("expected list subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agents_list_json_watch_event_failure_serializes() {
+        let event = JsonWatchEvent {
+            event: "refresh",
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            scopes: vec!["project:/tmp/demo".into()],
+            result: JsonWatchResult::Failure {
+                error: "boom".into(),
+            },
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["event"], json!("refresh"));
+        assert_eq!(value["status"], json!("failure"));
+        assert_eq!(value["error"], json!("boom"));
+        assert_eq!(value["scopes"][0], json!("project:/tmp/demo"));
+    }
 }

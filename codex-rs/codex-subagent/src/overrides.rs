@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use dirs::home_dir;
+use dunce::canonicalize as normalize_path;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -36,6 +37,8 @@ pub struct CliManifestOverride {
     pub manifest: Value,
     /// Human-friendly label (e.g., `cli` or the manifest path).
     pub label: Option<String>,
+    /// Optional source path (present for `--cli-manifest-file` overrides).
+    pub path: Option<PathBuf>,
 }
 
 /// Parsed `--plugin id=path` argument.
@@ -91,6 +94,7 @@ pub fn parse_subagent_overrides(
         overrides.cli_manifests.push(CliManifestOverride {
             manifest,
             label: Some("cli".into()),
+            path: None,
         });
     }
 
@@ -102,6 +106,7 @@ pub fn parse_subagent_overrides(
         overrides.cli_manifests.push(CliManifestOverride {
             manifest,
             label: Some(path.to_string_lossy().into_owned()),
+            path: Some(normalize_path(path).unwrap_or_else(|_| path.to_path_buf())),
         });
     }
 
@@ -141,10 +146,17 @@ pub fn build_discovery_targets(args: &DiscoveryTargetArgs<'_>) -> Result<Vec<Dis
     }
 
     for manifest in &args.overrides.cli_manifests {
-        targets.push(DiscoveryTarget::CliJson {
-            manifest: manifest.manifest.clone(),
-            label: manifest.label.clone(),
-        });
+        if let Some(path) = &manifest.path {
+            targets.push(DiscoveryTarget::CliManifestFile {
+                path: path.clone(),
+                label: manifest.label.clone(),
+            });
+        } else {
+            targets.push(DiscoveryTarget::CliJson {
+                manifest: manifest.manifest.clone(),
+                label: manifest.label.clone(),
+            });
+        }
     }
 
     Ok(targets)
@@ -371,6 +383,7 @@ mod tests {
             cli_manifests: vec![CliManifestOverride {
                 manifest: serde_json::json!({"name": "inline"}),
                 label: Some("cli".into()),
+                path: None,
             }],
             plugin_dirs: vec![PluginDirArg {
                 id: PluginId::new("demo"),

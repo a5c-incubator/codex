@@ -1,4 +1,5 @@
 pub(crate) mod hooks;
+pub(crate) mod intent;
 pub mod transcripts;
 
 pub(crate) use transcripts::SubagentResumeToken;

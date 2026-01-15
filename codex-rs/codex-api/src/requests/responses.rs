@@ -142,6 +142,10 @@ impl<'a> ResponsesRequestBuilder<'a> {
         let mut body = serde_json::to_value(&req)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
+        if !include_output_metadata_in_request(provider) {
+            strip_output_metadata(&mut body);
+        }
+
         if store && provider.is_azure_responses_endpoint() {
             attach_item_ids(&mut body, input);
         }
@@ -187,14 +191,57 @@ fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
     }
 }
 
+const OUTPUT_METADATA_ENV_VAR: &str = "CODEX_INCLUDE_OUTPUT_METADATA_IN_REQUEST";
+
+fn include_output_metadata_in_request(provider: &Provider) -> bool {
+    if let Ok(value) = std::env::var(OUTPUT_METADATA_ENV_VAR)
+        && let Some(parsed) = parse_env_bool(&value)
+    {
+        return parsed;
+    }
+
+    !is_public_openai_endpoint(provider)
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn is_public_openai_endpoint(provider: &Provider) -> bool {
+    let base = provider.base_url.to_ascii_lowercase();
+    base.contains("api.openai.com") || provider.is_azure_responses_endpoint()
+}
+
+fn strip_output_metadata(payload_json: &mut Value) {
+    let Some(input_value) = payload_json.get_mut("input") else {
+        return;
+    };
+    let Value::Array(items) = input_value else {
+        return;
+    };
+
+    for item in items {
+        if let Some(obj) = item.as_object_mut() {
+            obj.remove("output_metadata");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::RetryConfig;
     use crate::provider::WireApi;
+    use codex_protocol::models::FunctionCallOutputMetadata;
+    use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::protocol::SubAgentSource;
     use http::HeaderValue;
     use pretty_assertions::assert_eq;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     fn provider(name: &str, base_url: &str) -> Provider {
@@ -261,5 +308,97 @@ mod tests {
             request.headers.get("x-openai-subagent"),
             Some(&HeaderValue::from_static("review"))
         );
+    }
+
+    #[test]
+    fn strips_output_metadata_for_public_openai_by_default() {
+        let _lock = OUTPUT_METADATA_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(OUTPUT_METADATA_ENV_VAR);
+        }
+
+        let input = vec![ResponseItem::FunctionCallOutput {
+            call_id: "call-1".into(),
+            output: FunctionCallOutputPayload {
+                content: "ok".into(),
+                success: Some(true),
+                ..Default::default()
+            },
+            output_metadata: Some(FunctionCallOutputMetadata { success: true }),
+        }];
+
+        let provider = provider("openai", "https://api.openai.com/v1");
+        let request = ResponsesRequestBuilder::new("gpt-test", "inst", &input)
+            .build(&provider)
+            .expect("request");
+
+        let first_item = request
+            .body
+            .get("input")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.as_object())
+            .expect("request input item");
+
+        assert!(!first_item.contains_key("output_metadata"));
+    }
+
+    #[test]
+    fn keeps_output_metadata_when_env_opt_in() {
+        let _lock = OUTPUT_METADATA_ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::set(Some("1"));
+
+        let input = vec![ResponseItem::FunctionCallOutput {
+            call_id: "call-1".into(),
+            output: FunctionCallOutputPayload {
+                content: "ok".into(),
+                success: Some(false),
+                ..Default::default()
+            },
+            output_metadata: Some(FunctionCallOutputMetadata { success: false }),
+        }];
+
+        let provider = provider("openai", "https://api.openai.com/v1");
+        let request = ResponsesRequestBuilder::new("gpt-test", "inst", &input)
+            .build(&provider)
+            .expect("request");
+
+        let metadata = request
+            .body
+            .get("input")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("output_metadata"))
+            .and_then(|v| v.get("success"))
+            .and_then(serde_json::Value::as_bool);
+
+        assert_eq!(metadata, Some(false));
+    }
+
+    static OUTPUT_METADATA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var(OUTPUT_METADATA_ENV_VAR).ok();
+            match value {
+                Some(v) => unsafe { std::env::set_var(OUTPUT_METADATA_ENV_VAR, v) },
+                None => unsafe { std::env::remove_var(OUTPUT_METADATA_ENV_VAR) },
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                unsafe { std::env::set_var(OUTPUT_METADATA_ENV_VAR, prev) };
+            } else {
+                unsafe { std::env::remove_var(OUTPUT_METADATA_ENV_VAR) };
+            }
+        }
     }
 }

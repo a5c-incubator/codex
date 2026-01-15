@@ -116,13 +116,17 @@ impl ToolCallRuntime {
                 call_id: call.call_id.clone(),
                 result: Err(Self::abort_message(call, secs)),
             },
-            _ => ResponseInputItem::FunctionCallOutput {
-                call_id: call.call_id.clone(),
-                output: FunctionCallOutputPayload {
+            _ => {
+                let output = FunctionCallOutputPayload {
                     content: Self::abort_message(call, secs),
                     ..Default::default()
-                },
-            },
+                };
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call.call_id.clone(),
+                    output_metadata: output.metadata(),
+                    output,
+                }
+            }
         }
     }
 

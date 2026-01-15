@@ -24,6 +24,7 @@ use async_channel::Receiver as AsyncReceiver;
 use async_channel::Sender as AsyncSender;
 use async_channel::TryRecvError;
 use async_stream::stream;
+use dunce::canonicalize as normalize_watch_path;
 use futures::stream::Stream;
 use notify::Config as NotifyConfig;
 use notify::Event as NotifyEvent;
@@ -278,6 +279,25 @@ impl FsManifestLoader {
         self.validate(path.to_path_buf(), manifest)
     }
 
+    fn parse_cli_manifest_file(
+        &self,
+        path: &Path,
+        scope: DiscoveryScope,
+    ) -> Result<AgentManifest, ManifestError> {
+        let bytes = fs::read(path).map_err(|source| ManifestError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut manifest: AgentManifest =
+            serde_json::from_slice(&bytes).map_err(|err| ManifestError::Parse {
+                path: path.to_path_buf(),
+                source: Box::new(err),
+            })?;
+        manifest.source = Some(scope);
+        manifest.digest = Some(compute_digest(&bytes));
+        self.validate(path.to_path_buf(), manifest)
+    }
+
     fn read_directory<F>(
         &self,
         path: &Path,
@@ -348,6 +368,19 @@ impl ManifestLoader for FsManifestLoader {
                         label: label.clone(),
                     };
                     match self.parse_json_payload(manifest, scope.clone()) {
+                        Ok(manifest) => {
+                            push_manifest(manifest, &mut manifests, &mut ids, &mut issues)?;
+                        }
+                        Err(err) => {
+                            record_validation_issue(err, Some(scope), &mut issues)?;
+                        }
+                    }
+                }
+                DiscoveryTarget::CliManifestFile { path, label } => {
+                    let scope = DiscoveryScope::CliJson {
+                        label: label.clone(),
+                    };
+                    match self.parse_cli_manifest_file(path, scope.clone()) {
                         Ok(manifest) => {
                             push_manifest(manifest, &mut manifests, &mut ids, &mut issues)?;
                         }
@@ -541,6 +574,13 @@ pub enum DiscoveryTarget {
         /// Optional diagnostic label (e.g., flag alias).
         label: Option<String>,
     },
+    /// File-backed CLI manifest override.
+    CliManifestFile {
+        /// Path to the manifest file.
+        path: PathBuf,
+        /// Optional diagnostic label.
+        label: Option<String>,
+    },
     /// User-level manifests.
     UserDir(PathBuf),
     /// Plugin-managed manifests.
@@ -559,6 +599,7 @@ impl DiscoveryTarget {
         match self {
             Self::ProjectDir(_) => DiscoveryPriority::Project,
             Self::CliJson { .. } => DiscoveryPriority::Cli,
+            Self::CliManifestFile { .. } => DiscoveryPriority::Cli,
             Self::UserDir(_) => DiscoveryPriority::User,
             Self::PluginDir { .. } => DiscoveryPriority::Plugin,
         }
@@ -576,7 +617,12 @@ fn start_watch(targets: &[DiscoveryTarget]) -> Result<LoaderWatch, ManifestError
     for target in targets {
         match target {
             DiscoveryTarget::CliJson { .. } => enqueue_cli_scope(&sender, target.clone()),
-            _ => watch_configs.push(TargetWatch::new(target.clone())?),
+            DiscoveryTarget::CliManifestFile { .. }
+            | DiscoveryTarget::ProjectDir(_)
+            | DiscoveryTarget::UserDir(_)
+            | DiscoveryTarget::PluginDir { .. } => {
+                watch_configs.push(TargetWatch::new(target.clone())?)
+            }
         }
     }
 
@@ -643,6 +689,10 @@ impl TargetWatch {
                     SubjectHint::Directory,
                 )
             }
+            DiscoveryTarget::CliManifestFile { path, .. } => {
+                let abs = make_absolute(path)?;
+                (abs.clone(), DebounceKey::Cli(abs), SubjectHint::File)
+            }
             DiscoveryTarget::CliJson { .. } => {
                 return Err(ManifestError::Inline(
                     "cli discovery targets do not support watch registration".into(),
@@ -686,11 +736,13 @@ enum DebounceKey {
     Project(PathBuf),
     User(PathBuf),
     Plugin { path: PathBuf, plugin: PluginId },
+    Cli(PathBuf),
 }
 
 enum SubjectHint {
     Directory,
     InferFromPath,
+    File,
 }
 
 struct SubjectConfig {
@@ -867,7 +919,7 @@ fn should_emit(debounce: &Arc<Mutex<HashMap<DebounceKey, Instant>>>, key: &Debou
 fn classify_subject(path: &Path, hint: SubjectHint) -> Result<SubjectConfig, ManifestError> {
     let metadata = fs::metadata(path);
     let (subject, recursive_mode) = match metadata {
-        Ok(meta) if meta.is_file() => (
+        Ok(meta) if meta.is_file() || matches!(hint, SubjectHint::File) => (
             WatchSubject::File(path.to_path_buf()),
             RecursiveMode::Recursive,
         ),
@@ -877,6 +929,11 @@ fn classify_subject(path: &Path, hint: SubjectHint) -> Result<SubjectConfig, Man
         ),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             if matches!(hint, SubjectHint::InferFromPath) && looks_like_manifest_file(path) {
+                (
+                    WatchSubject::File(path.to_path_buf()),
+                    RecursiveMode::Recursive,
+                )
+            } else if matches!(hint, SubjectHint::File) {
                 (
                     WatchSubject::File(path.to_path_buf()),
                     RecursiveMode::Recursive,
@@ -913,11 +970,13 @@ fn classify_subject(path: &Path, hint: SubjectHint) -> Result<SubjectConfig, Man
 }
 
 fn make_absolute(path: &Path) -> Result<PathBuf, ManifestError> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    let cwd = env::current_dir().map_err(|err| watch_setup_error(path.to_path_buf(), err))?;
-    Ok(cwd.join(path))
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let cwd = env::current_dir().map_err(|err| watch_setup_error(path.to_path_buf(), err))?;
+        cwd.join(path)
+    };
+    Ok(normalize_watch_path(&absolute).unwrap_or(absolute))
 }
 
 fn nearest_existing_ancestor(path: &Path) -> PathBuf {
@@ -1267,6 +1326,50 @@ Plugin duplicate
     }
 
     #[test]
+    fn cli_manifest_file_loads_latest_contents() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let cli_path = temp.path().join("cli.json");
+        fs::write(
+            &cli_path,
+            serde_json::to_vec(&json!({
+                "id": "cli-file",
+                "name": "CLI File",
+                "description": "initial",
+                "body": "initial"
+            }))?,
+        )?;
+
+        let target = DiscoveryTarget::CliManifestFile {
+            path: cli_path.clone(),
+            label: Some("cli.json".into()),
+        };
+        let loader = FsManifestLoader::new();
+        let outcome = loader.load(std::slice::from_ref(&target))?;
+        assert_eq!(outcome.manifests.len(), 1);
+        assert_eq!(outcome.manifests[0].description, "initial");
+
+        fs::write(
+            &cli_path,
+            serde_json::to_vec(&json!({
+                "id": "cli-file",
+                "name": "CLI File",
+                "description": "updated",
+                "body": "updated"
+            }))?,
+        )?;
+        let refreshed = loader.load(std::slice::from_ref(&target))?;
+        assert_eq!(refreshed.manifests.len(), 1);
+        assert_eq!(refreshed.manifests[0].description, "updated");
+        assert_eq!(
+            refreshed.manifests[0].source,
+            Some(DiscoveryScope::CliJson {
+                label: Some("cli.json".into())
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validation_errors_surface_with_scope_details() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
         let invalid = temp.path().join("broken.yaml");
@@ -1372,6 +1475,57 @@ mod watch_tests {
                 plugin: plugin_id
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_manifest_file_watch_detects_edits_and_recreation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let manifest_path = temp.path().join("cli.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({
+                "id": "cli-inline",
+                "name": "CLI Inline",
+                "description": "initial",
+                "body": "initial"
+            }))?,
+        )?;
+
+        let loader = FsManifestLoader::new();
+        let target = DiscoveryTarget::CliManifestFile {
+            path: manifest_path.clone(),
+            label: Some("cli.json".into()),
+        };
+        let watch = loader.watch(std::slice::from_ref(&target))?;
+
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({
+                "id": "cli-inline",
+                "name": "CLI Inline",
+                "description": "updated",
+                "body": "updated"
+            }))?,
+        )?;
+        let first = recv_with_timeout(&watch, Duration::from_secs(5)).expect("edit event");
+        assert_eq!(first.scope, target);
+
+        fs::remove_file(&manifest_path)?;
+        thread::sleep(Duration::from_millis(300));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({
+                "id": "cli-inline",
+                "name": "CLI Inline",
+                "description": "recreated",
+                "body": "recreated"
+            }))?,
+        )?;
+        let second = recv_with_timeout(&watch, Duration::from_secs(5)).expect("recreate event");
+        assert_eq!(second.scope, target);
+
         Ok(())
     }
 

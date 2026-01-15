@@ -155,21 +155,8 @@ impl ResponsesRequest {
         call_id: &str,
         call_type: &str,
     ) -> Option<(Option<String>, Option<bool>)> {
-        let output = self
-            .call_output(call_id, call_type)
-            .get("output")
-            .cloned()
-            .unwrap_or(Value::Null);
-        match output {
-            Value::String(text) => Some((Some(text), None)),
-            Value::Object(obj) => Some((
-                obj.get("content")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                obj.get("success").and_then(Value::as_bool),
-            )),
-            _ => Some((None, None)),
-        }
+        let item = self.call_output(call_id, call_type);
+        Some(parse_output_item(&item))
     }
 
     pub fn header(&self, name: &str) -> Option<String> {
@@ -190,6 +177,80 @@ impl ResponsesRequest {
             .query_pairs()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.to_string())
+    }
+}
+
+fn parse_output_item(item: &Value) -> (Option<String>, Option<bool>) {
+    let metadata_success = item
+        .get("output_metadata")
+        .and_then(|meta| meta.get("success"))
+        .and_then(Value::as_bool);
+    let output = item.get("output").cloned().unwrap_or(Value::Null);
+    match output {
+        Value::String(text) => (Some(text), metadata_success),
+        Value::Array(items) => {
+            let serialized = serde_json::to_string(&items).ok();
+            (serialized, metadata_success)
+        }
+        Value::Object(obj) => (
+            obj.get("content")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            obj.get("success")
+                .and_then(Value::as_bool)
+                .or(metadata_success),
+        ),
+        _ => (None, metadata_success),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_success_from_metadata_string_output() {
+        let item = json!({
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "ok",
+            "output_metadata": {"success": false}
+        });
+        let (content, success) = parse_output_item(&item);
+        assert_eq!(content, Some("ok".to_string()));
+        assert_eq!(success, Some(false));
+    }
+
+    #[test]
+    fn parses_success_from_metadata_array_output() {
+        let item = json!({
+            "type": "function_call_output",
+            "call_id": "call-2",
+            "output": [{"type":"input_text","text":"wrapped"}],
+            "output_metadata": {"success": true}
+        });
+        let (content, success) = parse_output_item(&item);
+        assert_eq!(
+            content,
+            Some(r#"[{"type":"input_text","text":"wrapped"}]"#.to_string())
+        );
+        assert_eq!(success, Some(true));
+    }
+
+    #[test]
+    fn parses_legacy_object_shape() {
+        let item = json!({
+            "type": "function_call_output",
+            "call_id": "call-3",
+            "output": {
+                "content": "legacy",
+                "success": false
+            }
+        });
+        let (content, success) = parse_output_item(&item);
+        assert_eq!(content, Some("legacy".to_string()));
+        assert_eq!(success, Some(false));
     }
 }
 
