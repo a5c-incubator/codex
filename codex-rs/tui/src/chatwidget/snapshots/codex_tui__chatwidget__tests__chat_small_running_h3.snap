@@ -2,6 +2,6 @@
 source: tui/src/chatwidget/tests.rs
 expression: terminal.backend()
 ---
-"                                        "
-"                                        "
-"                                        "
+"Active agent: Default session (session) "
+"Model: gpt-5.2-codex | Tools: inherit   "
+"parent session                          "

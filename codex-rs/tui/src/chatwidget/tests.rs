@@ -384,6 +384,7 @@ async fn make_chatwidget_manual(
     });
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
     let codex_home = cfg.codex_home.clone();
+    let base_agent = ActiveAgentInfo::primary(resolved_model.clone());
     let widget = ChatWidget {
         app_event_tx,
         codex_op_tx: op_tx,
@@ -426,6 +427,8 @@ async fn make_chatwidget_manual(
         feedback: codex_feedback::CodexFeedback::new(),
         current_rollout_path: None,
         external_editor_state: ExternalEditorState::Closed,
+        primary_agent: base_agent.clone(),
+        active_agent: base_agent,
     };
     (widget, rx, op_rx)
 }
@@ -1871,7 +1874,15 @@ fn render_bottom_first_row(chat: &ChatWidget, width: u16) -> String {
                 row.push_str(s);
             }
         }
-        if !row.trim().is_empty() {
+        let trimmed = row.trim();
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("Active agent:")
+            && !trimmed.starts_with("Model:")
+            && !trimmed.starts_with("Switch agents with")
+            && !trimmed.starts_with("\"--use-subagent")
+            && !trimmed.contains("Inspect transcripts + resume tokens")
+            && !trimmed.contains("resume-status")
+        {
             return row;
         }
     }
@@ -2022,6 +2033,16 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 async fn approvals_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
+    #[cfg(target_os = "windows")]
+    let was_sandbox_enabled = codex_core::get_platform_sandbox().is_some();
+    #[cfg(target_os = "windows")]
+    let was_elevated_enabled = codex_core::is_windows_elevated_sandbox_enabled();
+    #[cfg(target_os = "windows")]
+    {
+        set_windows_sandbox_enabled(true);
+        set_windows_elevated_sandbox_enabled(true);
+    }
+
     chat.config.notices.hide_full_access_warning = None;
     chat.open_approvals_popup();
 
@@ -2032,6 +2053,12 @@ async fn approvals_selection_popup_snapshot() {
     });
     #[cfg(not(target_os = "windows"))]
     assert_snapshot!("approvals_selection_popup", popup);
+
+    #[cfg(target_os = "windows")]
+    {
+        set_windows_sandbox_enabled(was_sandbox_enabled);
+        set_windows_elevated_sandbox_enabled(was_elevated_enabled);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3239,7 +3266,7 @@ async fn apply_patch_untrusted_shows_approval_modal() -> anyhow::Result<()> {
     });
 
     // Render and ensure the approval modal title is present
-    let area = Rect::new(0, 0, 80, 12);
+    let area = Rect::new(0, 0, 80, 16);
     let mut buf = Buffer::empty(area);
     chat.render(area, &mut buf);
 

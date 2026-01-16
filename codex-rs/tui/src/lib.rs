@@ -13,6 +13,8 @@ use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
+use codex_core::agent::AgentRegistry;
+use codex_core::agent::RefreshInvocation;
 use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -25,6 +27,7 @@ use codex_core::protocol::AskForApproval;
 use codex_protocol::config_types::SandboxMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use tracing::error;
 use tracing_appender::non_blocking;
@@ -119,6 +122,8 @@ pub async fn run_main(
             cli.approval_policy.map(Into::into),
         )
     };
+
+    let requested_subagent = cli.use_subagent.clone();
 
     // Map the legacy --search flag to the new feature toggle.
     if cli.web_search {
@@ -220,11 +225,16 @@ pub async fn run_main(
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
         show_raw_agent_reasoning: cli.oss.then_some(true),
+        subagent_discovery_overrides: None,
         additional_writable_roots: additional_dirs,
         ..Default::default()
     };
 
     let config = load_config_or_exit(cli_kv_overrides.clone(), overrides.clone()).await;
+
+    if let Some(agent_id) = requested_subagent.as_deref() {
+        ensure_subagent_available(agent_id, &config.cwd)?;
+    }
 
     if let Some(warning) = add_dir_warning_message(&cli.add_dir, config.sandbox_policy.get()) {
         #[allow(clippy::print_stderr)]
@@ -328,6 +338,7 @@ pub async fn run_main(
         cli_kv_overrides,
         active_profile,
         feedback,
+        requested_subagent,
     )
     .await
     .map_err(|err| std::io::Error::other(err.to_string()))
@@ -340,6 +351,7 @@ async fn run_ratatui_app(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     active_profile: Option<String>,
     feedback: codex_feedback::CodexFeedback,
+    requested_subagent: Option<String>,
 ) -> color_eyre::Result<AppExitInfo> {
     color_eyre::install()?;
 
@@ -504,6 +516,7 @@ async fn run_ratatui_app(
         images,
         resume_selection,
         feedback,
+        requested_subagent,
         should_show_trust_screen, // Proxy to: is it a first run in this directory?
     )
     .await;
@@ -524,6 +537,30 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
+    }
+}
+
+fn ensure_subagent_available(agent_id: &str, cwd: &Path) -> std::io::Result<()> {
+    match AgentRegistry::load_from_default_targets_with_telemetry(
+        cwd,
+        None,
+        RefreshInvocation::EnsureAvailable,
+    ) {
+        Ok(registry) => {
+            if registry.has_agent(agent_id) {
+                Ok(())
+            } else {
+                let project_dir = cwd.join(".claude").join("agents");
+                Err(std::io::Error::other(format!(
+                    "unknown subagent `{agent_id}`. Create a manifest under {} or ~/.claude/agents",
+                    project_dir.display()
+                )))
+            }
+        }
+        Err(err) => Err(std::io::Error::other(format!(
+            "failed to load subagent manifests from {}: {err}",
+            cwd.display()
+        ))),
     }
 }
 

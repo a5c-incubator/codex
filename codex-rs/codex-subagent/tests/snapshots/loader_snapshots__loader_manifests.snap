@@ -1,0 +1,140 @@
+---
+source: subagent/tests/loader_snapshots.rs
+expression: manifests
+---
+[
+  {
+    "id": "alpha",
+    "name": "Alpha Builder",
+    "description": "Builds the workspace",
+    "model": "claude-3.5-sonnet",
+    "tools": [
+      "search",
+      "shell"
+    ],
+    "permissionMode": "dontAsk",
+    "hooks": {
+      "pre": [
+        {
+          "name": "audit",
+          "description": "Ensure safety",
+          "command": "./audit.sh"
+        }
+      ],
+      "post": [
+        {
+          "name": "summary",
+          "endpoint": "https://example.com/hooks/summary"
+        }
+      ]
+    },
+    "triggers": [
+      {
+        "type": "keyword",
+        "phrase": "build",
+        "weight": 10
+      }
+    ],
+    "skills": [
+      "build"
+    ],
+    "body": "You are the primary build agent.",
+    "source": {
+      "kind": "project",
+      "path": "C:\\work\\codex\\codex-rs\\codex-subagent\\tests\\data\\project\\alpha.md"
+    },
+    "digest": "93a3fae5cebebefdb785c12b876af6d3a84be27481b4108e34564a915df7cede"
+  },
+  {
+    "id": "delta",
+    "name": "Delta Specialist",
+    "description": "Handles delta debugging",
+    "permissionMode": "plan",
+    "hooks": {},
+    "triggers": [
+      {
+        "type": "keyword",
+        "phrase": "plan",
+        "weight": 3
+      }
+    ],
+    "body": "Plan carefully before executing.",
+    "source": {
+      "kind": "cliJson",
+      "label": "cli"
+    },
+    "digest": "d6af0a1616c8ec126b4e718844a9b1d31ef30967fffd384f6ad67c418a52a9e0"
+  },
+  {
+    "id": "beta",
+    "name": "Beta Reviewer",
+    "description": "Reviews code changes",
+    "tools": [
+      "git",
+      "diff"
+    ],
+    "permissionMode": "acceptEdits",
+    "hooks": {
+      "pre": [
+        {
+          "name": "capture",
+          "tools": [
+            "git"
+          ],
+          "command": "./capture.sh"
+        }
+      ]
+    },
+    "triggers": [
+      {
+        "type": "glob",
+        "pattern": "review-*",
+        "weight": 5
+      }
+    ],
+    "skills": [
+      "review"
+    ],
+    "body": "Stay focused on review quality.\n",
+    "source": {
+      "kind": "user",
+      "path": "C:\\work\\codex\\codex-rs\\codex-subagent\\tests\\data\\user\\beta.yaml"
+    },
+    "digest": "1b7b42aae760296500d6d14a4bbbc0917754fe383c6a66ad58e3bc3f400260ee"
+  },
+  {
+    "id": "gamma",
+    "name": "Gamma Explorer",
+    "description": "Explores external resources",
+    "tools": [
+      "web",
+      "search"
+    ],
+    "permissionMode": "bypassPermissions",
+    "hooks": {
+      "stop": [
+        {
+          "name": "cleanup",
+          "endpoint": "https://example.com/hooks/cleanup"
+        }
+      ]
+    },
+    "triggers": [
+      {
+        "type": "keyword",
+        "phrase": "explore",
+        "weight": 6
+      }
+    ],
+    "skills": [
+      "exploration"
+    ],
+    "body": "Be curious and collect external information.",
+    "source": {
+      "kind": "plugin",
+      "path": "C:\\work\\codex\\codex-rs\\codex-subagent\\tests\\data\\plugin\\gamma.json",
+      "pluginId": "demo-plugin"
+    },
+    "digest": "9ba6de54325569102dc253c16794d0c103e0e2677deae8186507c7445575eebf"
+  }
+]

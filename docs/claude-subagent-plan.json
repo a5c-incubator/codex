@@ -1,0 +1,34 @@
+[
+  {
+    "title": "Audit Inputs",
+    "task": "Review AGENTS.md conventions, existing CLI/orchestrator crates, and the Claude Code sub-agent spec to capture compatibility requirements and current gaps."
+  },
+  {
+    "title": "Design Architecture",
+    "task": "Draft a pluggable architecture (crate boundaries, traits, data flow) that maps Codex agent lifecycle to Claude register/handshake APIs, including diagrams or tables for reviewers."
+  },
+  {
+    "title": "Scaffold Subagent Crate",
+    "task": "Introduce a new codex-subagent crate with feature-gated interfaces, shared models for Claude subagents, and minimal unit tests validating serialization."
+  },
+  {
+    "title": "Implement Registration Flow",
+    "task": "Add concrete orchestrator glue so Codex can register Claude-compatible subagents (config parsing, manifest validation, handshake helpers) with thorough error handling."
+  },
+  {
+    "title": "Wire Orchestration",
+    "task": "Integrate the subagent orchestrator into existing runtime entrypoints (CLI/server) so subagents can be discovered, initialized, and invoked deterministically."
+  },
+  {
+    "title": "Document Usage",
+    "task": "Create docs describing how to implement, register, and orchestrate subagents (flow diagrams, config examples, lifecycle reference) plus a runnable demo manifest."
+  },
+  {
+    "title": "Add Validation & Tests",
+    "task": "Author targeted unit/integration tests (including mocked Claude API interactions) proving registration/orchestration flows succeed and reject invalid manifests."
+  },
+  {
+    "title": "Quality Gates",
+    "task": "Run just fmt, just fix -p <affected>, and scoped cargo test suites; document the commands and their outcomes for reviewers."
+  }
+]

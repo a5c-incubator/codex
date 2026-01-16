@@ -145,6 +145,8 @@ use codex_core::protocol::ReviewDelivery as CoreReviewDelivery;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget as CoreReviewTarget;
 use codex_core::protocol::SessionConfiguredEvent;
+use codex_core::protocol::SubagentOverride;
+use codex_core::protocol::SubagentOverrideOrigin;
 use codex_core::read_head_for_summary;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_feedback::CodexFeedback;
@@ -1293,6 +1295,7 @@ impl CodexMessageProcessor {
             developer_instructions,
             compact_prompt,
             include_apply_patch_tool,
+            subagent_discovery_overrides: None,
             ..Default::default()
         };
 
@@ -1484,6 +1487,7 @@ impl CodexMessageProcessor {
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             base_instructions,
             developer_instructions,
+            subagent_discovery_overrides: None,
             ..Default::default()
         }
     }
@@ -2548,6 +2552,7 @@ impl CodexMessageProcessor {
                     developer_instructions,
                     compact_prompt,
                     include_apply_patch_tool,
+                    subagent_discovery_overrides: None,
                     ..Default::default()
                 };
 
@@ -2733,6 +2738,7 @@ impl CodexMessageProcessor {
                     developer_instructions,
                     compact_prompt,
                     include_apply_patch_tool,
+                    subagent_discovery_overrides: None,
                     ..Default::default()
                 };
 
@@ -2950,6 +2956,7 @@ impl CodexMessageProcessor {
         // If the thread is active, request shutdown and wait briefly.
         if let Some(conversation) = self.thread_manager.remove_thread(&thread_id).await {
             info!("thread {thread_id} was active; shutting down");
+            Self::ensure_subagent_cleared(&conversation).await;
             let conversation_clone = conversation.clone();
             let notify = Arc::new(tokio::sync::Notify::new());
             let notify_clone = notify.clone();
@@ -3056,6 +3063,22 @@ impl CodexMessageProcessor {
             .await;
     }
 
+    async fn ensure_subagent_cleared(thread: &Arc<CodexThread>) {
+        let _ = thread
+            .submit(Op::OverrideTurnContext {
+                cwd: None,
+                approval_policy: None,
+                sandbox_policy: None,
+                model: None,
+                effort: None,
+                summary: None,
+                subagent: Some(SubagentOverride::Clear {
+                    origin: Some(SubagentOverrideOrigin::DaemonApi),
+                }),
+            })
+            .await;
+    }
+
     async fn send_user_turn(&self, request_id: RequestId, params: SendUserTurnParams) {
         let SendUserTurnParams {
             conversation_id,
@@ -3067,6 +3090,7 @@ impl CodexMessageProcessor {
             effort,
             summary,
             output_schema,
+            subagent,
         } = params;
 
         let Ok(conversation) = self.thread_manager.get_thread(conversation_id).await else {
@@ -3087,6 +3111,24 @@ impl CodexMessageProcessor {
                 WireInputItem::LocalImage { path } => CoreInputItem::LocalImage { path },
             })
             .collect();
+
+        if let Some(agent_id) = subagent {
+            let _ = conversation
+                .submit(Op::OverrideTurnContext {
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox_policy: None,
+                    model: None,
+                    effort: None,
+                    summary: None,
+                    subagent: Some(SubagentOverride::Activate {
+                        id: agent_id,
+                        resume: None,
+                        origin: Some(SubagentOverrideOrigin::DaemonApi),
+                    }),
+                })
+                .await;
+        }
 
         let _ = conversation
             .submit(Op::UserTurn {
@@ -3160,7 +3202,20 @@ impl CodexMessageProcessor {
     }
 
     async fn turn_start(&self, request_id: RequestId, params: TurnStartParams) {
-        let (_, thread) = match self.load_thread(&params.thread_id).await {
+        let TurnStartParams {
+            thread_id,
+            input,
+            cwd,
+            approval_policy,
+            sandbox_policy,
+            model,
+            effort,
+            summary,
+            output_schema,
+            subagent,
+        } = params;
+
+        let (_, thread) = match self.load_thread(&thread_id).await {
             Ok(v) => v,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -3169,29 +3224,32 @@ impl CodexMessageProcessor {
         };
 
         // Map v2 input items to core input items.
-        let mapped_items: Vec<CoreInputItem> = params
-            .input
-            .into_iter()
-            .map(V2UserInput::into_core)
-            .collect();
+        let mapped_items: Vec<CoreInputItem> =
+            input.into_iter().map(V2UserInput::into_core).collect();
 
-        let has_any_overrides = params.cwd.is_some()
-            || params.approval_policy.is_some()
-            || params.sandbox_policy.is_some()
-            || params.model.is_some()
-            || params.effort.is_some()
-            || params.summary.is_some();
+        let has_any_overrides = cwd.is_some()
+            || approval_policy.is_some()
+            || sandbox_policy.is_some()
+            || model.is_some()
+            || effort.is_some()
+            || summary.is_some()
+            || subagent.is_some();
 
         // If any overrides are provided, update the session turn context first.
         if has_any_overrides {
             let _ = thread
                 .submit(Op::OverrideTurnContext {
-                    cwd: params.cwd,
-                    approval_policy: params.approval_policy.map(AskForApproval::to_core),
-                    sandbox_policy: params.sandbox_policy.map(|p| p.to_core()),
-                    model: params.model,
-                    effort: params.effort.map(Some),
-                    summary: params.summary,
+                    cwd,
+                    approval_policy: approval_policy.map(AskForApproval::to_core),
+                    sandbox_policy: sandbox_policy.map(|p| p.to_core()),
+                    model,
+                    effort: effort.map(Some),
+                    summary,
+                    subagent: subagent.map(|id| SubagentOverride::Activate {
+                        id,
+                        resume: None,
+                        origin: Some(SubagentOverrideOrigin::DaemonApi),
+                    }),
                 })
                 .await;
         }
@@ -3200,7 +3258,7 @@ impl CodexMessageProcessor {
         let turn_id = thread
             .submit(Op::UserInput {
                 items: mapped_items,
-                final_output_json_schema: params.output_schema,
+                final_output_json_schema: output_schema,
             })
             .await;
 
@@ -3217,10 +3275,7 @@ impl CodexMessageProcessor {
                 self.outgoing.send_response(request_id, response).await;
 
                 // Emit v2 turn/started notification.
-                let notif = TurnStartedNotification {
-                    thread_id: params.thread_id,
-                    turn,
-                };
+                let notif = TurnStartedNotification { thread_id, turn };
                 self.outgoing
                     .send_server_notification(ServerNotification::TurnStarted(notif))
                     .await;

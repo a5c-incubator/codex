@@ -30,13 +30,15 @@ pub(crate) async fn handle_mcp_tool_call(
             Ok(value) => Some(value),
             Err(e) => {
                 error!("failed to parse tool call arguments: {e}");
+                let output = FunctionCallOutputPayload {
+                    content: format!("err: {e}"),
+                    success: Some(false),
+                    ..Default::default()
+                };
                 return ResponseInputItem::FunctionCallOutput {
                     call_id: call_id.clone(),
-                    output: FunctionCallOutputPayload {
-                        content: format!("err: {e}"),
-                        success: Some(false),
-                        ..Default::default()
-                    },
+                    output_metadata: output.metadata(),
+                    output,
                 };
             }
         }

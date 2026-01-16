@@ -1167,6 +1167,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
     });
     prompt.input.push(ResponseItem::FunctionCallOutput {
         call_id: "function-call-id".into(),
+        output_metadata: None,
         output: FunctionCallOutputPayload {
             content: "ok".into(),
             ..Default::default()

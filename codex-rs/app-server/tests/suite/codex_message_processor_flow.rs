@@ -304,6 +304,7 @@ async fn test_send_user_turn_changes_approval_policy_behavior() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: None,
+            subagent: None,
         })
         .await?;
     // Acknowledge sendUserTurn
@@ -418,6 +419,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: None,
+            subagent: None,
         })
         .await?;
     timeout(
@@ -445,6 +447,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() -> Result<(
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: None,
+            subagent: None,
         })
         .await?;
     timeout(

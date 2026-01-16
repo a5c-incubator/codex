@@ -11,6 +11,8 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubagentLifecyclePhase;
+use codex_protocol::protocol::SubagentOverrideOrigin;
 use codex_protocol::user_input::UserInput;
 use eventsource_stream::Event as StreamEvent;
 use eventsource_stream::EventStreamError as StreamError;
@@ -126,6 +128,114 @@ impl OtelManager {
             mcp_servers = mcp_servers.join(", "),
             active_profile = active_profile,
         )
+    }
+
+    pub fn subagent_lifecycle(
+        &self,
+        phase: SubagentLifecyclePhase,
+        agent_id: &str,
+        manifest_digest: Option<&str>,
+        approval_policy: AskForApproval,
+        sandbox_policy: &SandboxPolicy,
+        resume_token: Option<&str>,
+    ) {
+        tracing::event!(
+            tracing::Level::INFO,
+            event.name = "codex.subagent_lifecycle",
+            event.timestamp = %timestamp(),
+            conversation.id = %self.metadata.conversation_id,
+            phase = phase.as_ref(),
+            agent.id = %agent_id,
+            manifest.digest = manifest_digest,
+            approval_policy = %approval_policy,
+            sandbox_policy = ?sandbox_policy,
+            resume.token = resume_token,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn subagent_registry_refresh(
+        &self,
+        invocation: &str,
+        status: &str,
+        total: usize,
+        built_in: usize,
+        custom: usize,
+        duplicates: usize,
+        project: usize,
+        cli: usize,
+        user: usize,
+        plugin: usize,
+        built_in_scope: usize,
+        unknown: usize,
+        issue_count: usize,
+        error: Option<&str>,
+    ) {
+        tracing::event!(
+            tracing::Level::INFO,
+            event.name = "codex.subagent_registry_refresh",
+            event.timestamp = %timestamp(),
+            conversation.id = %self.metadata.conversation_id,
+            invocation = invocation,
+            status = status,
+            total,
+            built_in = built_in,
+            custom,
+            duplicates,
+            scope.project = project,
+            scope.cli = cli,
+            scope.user = user,
+            scope.plugin = plugin,
+            scope.built_in = built_in_scope,
+            scope.unknown = unknown,
+            issues = issue_count,
+            error.message = error,
+        );
+    }
+
+    pub fn subagent_manifest_issue(
+        &self,
+        invocation: &str,
+        scope: Option<&str>,
+        path: Option<&str>,
+        message: &str,
+    ) {
+        tracing::event!(
+            tracing::Level::WARN,
+            event.name = "codex.subagent_manifest_issue",
+            event.timestamp = %timestamp(),
+            conversation.id = %self.metadata.conversation_id,
+            invocation = invocation,
+            scope = scope,
+            path = path,
+            message = message,
+        );
+    }
+
+    pub fn subagent_switch(
+        &self,
+        action: &str,
+        status: &str,
+        session_source: &SessionSource,
+        agent_id: Option<&str>,
+        scope: Option<&str>,
+        origin: Option<&SubagentOverrideOrigin>,
+        error: Option<&str>,
+    ) {
+        let origin_label = origin.map(|value| value.to_string());
+        tracing::event!(
+            tracing::Level::INFO,
+            event.name = "codex.subagent_switch",
+            event.timestamp = %timestamp(),
+            conversation.id = %self.metadata.conversation_id,
+            action = action,
+            status = status,
+            session.source = %session_source,
+            agent.id = agent_id,
+            scope = scope,
+            origin = origin_label.as_deref(),
+            error.message = error,
+        );
     }
 
     pub async fn log_request<F, Fut>(&self, attempt: u64, f: F) -> Result<Response, Error>

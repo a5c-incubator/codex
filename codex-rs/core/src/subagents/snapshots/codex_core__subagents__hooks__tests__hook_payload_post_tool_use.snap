@@ -1,0 +1,16 @@
+---
+source: core/src/subagents/hooks.rs
+expression: json
+---
+{
+  "phase": "post_tool_use",
+  "manifest_id": "docs-demo",
+  "call_id": "call-PostToolUse",
+  "session_source": "cli",
+  "sandbox_policy": {
+    "type": "danger-full-access"
+  },
+  "approval_policy": "never",
+  "success": true,
+  "stdout_snippet": "hook ok"
+}

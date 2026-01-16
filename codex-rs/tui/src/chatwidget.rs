@@ -49,6 +49,12 @@ use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SkillsListEntry;
 use codex_core::protocol::StreamErrorEvent;
+use codex_core::protocol::SubagentLifecycleEvent;
+use codex_core::protocol::SubagentLifecyclePhase;
+use codex_core::protocol::SubagentOverride;
+use codex_core::protocol::SubagentOverrideOrigin;
+use codex_core::protocol::SubagentToolScope;
+use codex_core::protocol::SubagentToolScopeMode;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TerminalInteractionEvent;
 use codex_core::protocol::TokenUsage;
@@ -372,11 +378,151 @@ pub(crate) struct ChatWidget {
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
     external_editor_state: ExternalEditorState,
+
+    primary_agent: ActiveAgentInfo,
+    active_agent: ActiveAgentInfo,
 }
 
 struct UserMessage {
     text: String,
     image_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveAgentInfo {
+    id: String,
+    name: String,
+    model: String,
+    tools: ToolSummary,
+    is_subagent: bool,
+}
+
+#[derive(Clone, Debug)]
+enum ToolSummary {
+    Inherit,
+    Restricted(Vec<String>),
+}
+
+impl ActiveAgentInfo {
+    fn primary(model: String) -> Self {
+        Self {
+            id: "session".to_string(),
+            name: "Default session".to_string(),
+            model,
+            tools: ToolSummary::Inherit,
+            is_subagent: false,
+        }
+    }
+
+    fn from_event(event: &SubagentLifecycleEvent, fallback_model: &str) -> Self {
+        Self {
+            id: event.agent_id.clone(),
+            name: event
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| event.agent_id.clone()),
+            model: event
+                .model
+                .clone()
+                .unwrap_or_else(|| fallback_model.to_string()),
+            tools: ToolSummary::from_scope(event.tool_scope.as_ref()),
+            is_subagent: true,
+        }
+    }
+
+    fn update_model(&mut self, model: &str) {
+        self.model = model.to_string();
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+}
+
+impl ToolSummary {
+    fn from_scope(scope: Option<&SubagentToolScope>) -> Self {
+        match scope {
+            Some(scope) if scope.mode == SubagentToolScopeMode::Restricted => {
+                Self::Restricted(scope.tools.clone())
+            }
+            _ => Self::Inherit,
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::Inherit => "Tools: inherit parent session".to_string(),
+            Self::Restricted(names) => {
+                if names.is_empty() {
+                    "Tools: restricted (no tools configured)".to_string()
+                } else {
+                    format!("Tools: restricted to {}", names.join(", "))
+                }
+            }
+        }
+    }
+}
+
+struct ActiveAgentBanner {
+    lines: Vec<Line<'static>>,
+}
+
+impl ActiveAgentBanner {
+    fn new(info: &ActiveAgentInfo) -> Self {
+        Self {
+            lines: build_active_agent_lines(info),
+        }
+    }
+
+    fn paragraph(&self) -> Paragraph<'static> {
+        Paragraph::new(self.lines.clone()).wrap(Wrap { trim: true })
+    }
+}
+
+impl Renderable for ActiveAgentBanner {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.paragraph().render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.paragraph().line_count(width) as u16
+    }
+}
+
+fn build_active_agent_lines(info: &ActiveAgentInfo) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let display_name = info.display_name().to_string();
+    let header = Line::from(vec![
+        "Active agent: ".bold(),
+        display_name.cyan().bold(),
+        format!(" ({})", info.id).dim(),
+    ]);
+    lines.push(header);
+
+    let details = format!("Model: {} | {}", info.model(), info.tools.description());
+    lines.push(Line::from(vec!["  ".into(), details.into()]));
+
+    lines.push(
+        Line::from(vec![
+            "  ".into(),
+            "Switch agents with \":use-agent <id>\" or restart with \"--use-subagent <id>\" (see `codex agents list`)."
+                .dim(),
+        ]),
+    );
+    lines.push(Line::from(vec![
+        "  ".into(),
+        "Inspect transcripts + resume tokens with `codex agents resume-status`.".dim(),
+    ]));
+
+    lines
 }
 
 impl From<String> for UserMessage {
@@ -444,6 +590,10 @@ impl ChatWidget {
         let initial_messages = event.initial_messages.clone();
         let model_for_header = event.model.clone();
         self.session_header.set_model(&model_for_header);
+        self.primary_agent = ActiveAgentInfo::primary(model_for_header.clone());
+        if !self.active_agent.is_subagent {
+            self.active_agent = self.primary_agent.clone();
+        }
         self.add_to_history(history_cell::new_session_info(
             &self.config,
             &model_for_header,
@@ -1424,6 +1574,7 @@ impl ChatWidget {
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), thread_manager);
+        let base_agent = ActiveAgentInfo::primary(model.clone());
 
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -1479,6 +1630,8 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             external_editor_state: ExternalEditorState::Closed,
+            primary_agent: base_agent.clone(),
+            active_agent: base_agent,
         };
 
         widget.prefetch_rate_limits();
@@ -1510,6 +1663,7 @@ impl ChatWidget {
 
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
+        let base_agent = ActiveAgentInfo::primary(model.clone());
 
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
@@ -1565,6 +1719,8 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             external_editor_state: ExternalEditorState::Closed,
+            primary_agent: base_agent.clone(),
+            active_agent: base_agent,
         };
 
         widget.prefetch_rate_limits();
@@ -1829,6 +1985,22 @@ impl ChatWidget {
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
+            SlashCommand::UseAgent => {
+                let cleared_agent = self
+                    .active_agent
+                    .is_subagent
+                    .then(|| self.active_agent.id.clone());
+                self.request_subagent_override(SubagentOverride::Clear {
+                    origin: Some(SubagentOverrideOrigin::SlashCommand),
+                });
+                self.log_subagent_client_action(
+                    "clear",
+                    cleared_agent.as_deref(),
+                    "requested",
+                    None,
+                );
+                self.add_info_message("Cleared active subagent.".to_string(), None);
+            }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
                     self.add_info_message(
@@ -1903,7 +2075,60 @@ impl ChatWidget {
                     },
                 });
             }
+            SlashCommand::UseAgent => {
+                if trimmed.is_empty() {
+                    let cleared_agent = self
+                        .active_agent
+                        .is_subagent
+                        .then(|| self.active_agent.id.clone());
+                    self.request_subagent_override(SubagentOverride::Clear {
+                        origin: Some(SubagentOverrideOrigin::SlashCommand),
+                    });
+                    self.log_subagent_client_action(
+                        "clear",
+                        cleared_agent.as_deref(),
+                        "requested",
+                        None,
+                    );
+                    self.add_info_message("Cleared active subagent.".to_string(), None);
+                } else {
+                    let agent_id = trimmed.to_string();
+                    self.log_subagent_client_action(
+                        "activate",
+                        Some(agent_id.as_str()),
+                        "requested",
+                        None,
+                    );
+                    self.request_subagent_override(SubagentOverride::Activate {
+                        id: agent_id.clone(),
+                        resume: None,
+                        origin: Some(SubagentOverrideOrigin::SlashCommand),
+                    });
+                    self.add_info_message(format!("Requested subagent `{agent_id}`"), None);
+                }
+            }
             _ => self.dispatch_command(cmd),
+        }
+    }
+
+    fn log_subagent_client_action(
+        &self,
+        action: &str,
+        agent_id: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+    ) {
+        if let Some(thread_id) = self.thread_id.as_ref() {
+            tracing::event!(
+                tracing::Level::INFO,
+                event.name = "codex.subagent_client_switch",
+                session.id = %thread_id,
+                origin = "slash_command",
+                action = action,
+                agent.id = agent_id,
+                status = status,
+                error.message = error,
+            );
         }
     }
 
@@ -2184,6 +2409,7 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
+            EventMsg::SubagentLifecycle(event) => self.on_subagent_lifecycle(event),
             EventMsg::ThreadRolledBack(_) => {}
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
@@ -2205,6 +2431,22 @@ impl ChatWidget {
             .unwrap_or_else(|| codex_core::review_prompts::user_facing_hint(&review.target));
         let banner = format!(">> Code review started: {hint} <<");
         self.add_to_history(history_cell::new_review_status_line(banner));
+        self.request_redraw();
+    }
+
+    fn on_subagent_lifecycle(&mut self, event: SubagentLifecycleEvent) {
+        let action = match event.phase {
+            SubagentLifecyclePhase::Activated => {
+                let fallback_model = self.primary_agent.model();
+                self.active_agent = ActiveAgentInfo::from_event(&event, fallback_model);
+                "activate"
+            }
+            SubagentLifecyclePhase::Stopped => {
+                self.active_agent = self.primary_agent.clone();
+                "clear"
+            }
+        };
+        self.log_subagent_client_action(action, Some(event.agent_id.as_str()), "completed", None);
         self.request_redraw();
     }
 
@@ -2424,6 +2666,7 @@ impl ChatWidget {
                 model: Some(switch_model.clone()),
                 effort: Some(Some(default_effort)),
                 summary: None,
+                subagent: None,
             }));
             tx.send(AppEvent::UpdateModel(switch_model.clone()));
             tx.send(AppEvent::UpdateReasoningEffort(Some(default_effort)));
@@ -2689,6 +2932,7 @@ impl ChatWidget {
                 model: Some(model_for_action.clone()),
                 effort: Some(effort_for_action),
                 summary: None,
+                subagent: None,
             }));
             tx.send(AppEvent::UpdateModel(model_for_action.clone()));
             tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
@@ -2860,6 +3104,7 @@ impl ChatWidget {
                 model: Some(model.clone()),
                 effort: Some(effort),
                 summary: None,
+                subagent: None,
             }));
         self.app_event_tx.send(AppEvent::UpdateModel(model.clone()));
         self.app_event_tx
@@ -3028,6 +3273,7 @@ impl ChatWidget {
                 model: None,
                 effort: None,
                 summary: None,
+                subagent: None,
             }));
             tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
             tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
@@ -3599,6 +3845,10 @@ impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: &str) {
         self.session_header.set_model(model);
         self.model = model.to_string();
+        self.primary_agent.update_model(model);
+        if !self.active_agent.is_subagent {
+            self.active_agent = self.primary_agent.clone();
+        }
     }
 
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
@@ -3678,6 +3928,18 @@ impl ChatWidget {
         if let Err(e) = self.codex_op_tx.send(op) {
             tracing::error!("failed to submit op: {e}");
         }
+    }
+
+    pub(crate) fn request_subagent_override(&self, subagent: SubagentOverride) {
+        self.submit_op(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            model: None,
+            effort: None,
+            summary: None,
+            subagent: Some(subagent),
+        });
     }
 
     fn on_list_mcp_tools(&mut self, ev: McpListToolsResponseEvent) {
@@ -3896,7 +4158,10 @@ impl ChatWidget {
             0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
         );
-        RenderableItem::Owned(Box::new(flex))
+        let mut column = ColumnRenderable::new();
+        column.push(ActiveAgentBanner::new(&self.active_agent));
+        column.push(flex);
+        RenderableItem::Owned(Box::new(column))
     }
 }
 

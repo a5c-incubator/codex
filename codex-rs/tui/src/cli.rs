@@ -85,6 +85,10 @@ pub struct Cli {
     #[arg(long = "add-dir", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
 
+    /// Activate a Claude-compatible subagent (see `codex agents list`) before the first turn.
+    #[arg(long = "use-subagent", value_name = "AGENT_ID")]
+    pub use_subagent: Option<String>,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }

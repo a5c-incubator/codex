@@ -2,6 +2,11 @@
 source: tui/src/chatwidget/tests.rs
 expression: terminal.backend().vt100().screen().contents()
 ---
+Active agent: Default session (session)
+Model: gpt-5.2-codex | Tools: inherit parent session
+Switch agents with ":use-agent <id>" or restart with "--use-subagent <id>" (see `codex agents
+list`).
+Inspect transcripts + resume tokens with `codex agents resume-status`.
 
 
   Would you like to run the following command?

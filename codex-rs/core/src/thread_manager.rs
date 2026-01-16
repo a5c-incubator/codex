@@ -99,6 +99,16 @@ impl ThreadManager {
         provider: ModelProviderInfo,
         codex_home: PathBuf,
     ) -> Self {
+        Self::with_models_provider_home_and_source(auth, provider, codex_home, SessionSource::Exec)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_models_provider_home_and_source(
+        auth: CodexAuth,
+        provider: ModelProviderInfo,
+        codex_home: PathBuf,
+        session_source: SessionSource,
+    ) -> Self {
         let auth_manager = AuthManager::from_auth_for_testing(auth);
         Self {
             state: Arc::new(ThreadManagerState {
@@ -110,7 +120,7 @@ impl ThreadManager {
                 )),
                 skills_manager: Arc::new(SkillsManager::new(codex_home)),
                 auth_manager,
-                session_source: SessionSource::Exec,
+                session_source,
             }),
             _test_codex_home_guard: None,
         }

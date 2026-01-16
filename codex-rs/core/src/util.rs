@@ -6,6 +6,14 @@ use rand::Rng;
 use tracing::debug;
 use tracing::error;
 
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::AtomicBool;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::Ordering;
+
+#[cfg(any(test, feature = "test-support"))]
+static PANIC_ON_TOOL_ERROR: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
+
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
 
@@ -41,8 +49,26 @@ pub(crate) fn backoff(attempt: u64) -> Duration {
     Duration::from_millis((base as f64 * jitter) as u64)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn disable_tool_error_panics() {
+    PANIC_ON_TOOL_ERROR.store(false, Ordering::Relaxed);
+}
+
 pub(crate) fn error_or_panic(message: impl std::string::ToString) {
-    if cfg!(debug_assertions) {
+    let should_panic = if cfg!(debug_assertions) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            PANIC_ON_TOOL_ERROR.load(Ordering::Relaxed)
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            true
+        }
+    } else {
+        false
+    };
+
+    if should_panic {
         panic!("{}", message.to_string());
     } else {
         error!("{}", message.to_string());

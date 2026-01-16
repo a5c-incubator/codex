@@ -24,14 +24,16 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
 
                 if !has_output {
                     info!("Function call output is missing for call id: {call_id}");
+                    let output = FunctionCallOutputPayload {
+                        content: "aborted".to_string(),
+                        ..Default::default()
+                    };
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::FunctionCallOutput {
                             call_id: call_id.clone(),
-                            output: FunctionCallOutputPayload {
-                                content: "aborted".to_string(),
-                                ..Default::default()
-                            },
+                            output_metadata: output.metadata(),
+                            output,
                         },
                     ));
                 }
@@ -71,14 +73,16 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                         error_or_panic(format!(
                             "Local shell call output is missing for call id: {call_id}"
                         ));
+                        let output = FunctionCallOutputPayload {
+                            content: "aborted".to_string(),
+                            ..Default::default()
+                        };
                         missing_outputs_to_insert.push((
                             idx,
                             ResponseItem::FunctionCallOutput {
                                 call_id: call_id.clone(),
-                                output: FunctionCallOutputPayload {
-                                    content: "aborted".to_string(),
-                                    ..Default::default()
-                                },
+                                output_metadata: output.metadata(),
+                                output,
                             },
                         ));
                     }

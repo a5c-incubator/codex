@@ -1,3 +1,4 @@
+pub mod agents_watch;
 pub mod debug_sandbox;
 mod exit_status;
 pub mod login;

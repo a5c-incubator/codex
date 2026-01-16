@@ -252,7 +252,11 @@ impl ContextManager {
     fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
         let policy_with_serialization_budget = policy.mul(1.2);
         match item {
-            ResponseItem::FunctionCallOutput { call_id, output } => {
+            ResponseItem::FunctionCallOutput {
+                call_id,
+                output,
+                output_metadata,
+            } => {
                 let truncated =
                     truncate_text(output.content.as_str(), policy_with_serialization_budget);
                 let truncated_items = output.content_items.as_ref().map(|items| {
@@ -263,6 +267,7 @@ impl ContextManager {
                 });
                 ResponseItem::FunctionCallOutput {
                     call_id: call_id.clone(),
+                    output_metadata: output_metadata.clone().or_else(|| output.metadata()),
                     output: FunctionCallOutputPayload {
                         content: truncated,
                         content_items: truncated_items,

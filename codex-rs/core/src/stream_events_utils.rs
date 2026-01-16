@@ -97,12 +97,14 @@ pub(crate) async fn handle_output_item_done(
                 .log_tool_failed("local_shell", msg);
             tracing::error!(msg);
 
+            let output_payload = FunctionCallOutputPayload {
+                content: msg.to_string(),
+                ..Default::default()
+            };
             let response = ResponseInputItem::FunctionCallOutput {
                 call_id: String::new(),
-                output: FunctionCallOutputPayload {
-                    content: msg.to_string(),
-                    ..Default::default()
-                },
+                output_metadata: output_payload.metadata(),
+                output: output_payload,
             };
             ctx.sess
                 .record_conversation_items(&ctx.turn_context, std::slice::from_ref(&item))
@@ -120,12 +122,14 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
+            let output_payload = FunctionCallOutputPayload {
+                content: message,
+                ..Default::default()
+            };
             let response = ResponseInputItem::FunctionCallOutput {
                 call_id: String::new(),
-                output: FunctionCallOutputPayload {
-                    content: message,
-                    ..Default::default()
-                },
+                output_metadata: output_payload.metadata(),
+                output: output_payload,
             };
             ctx.sess
                 .record_conversation_items(&ctx.turn_context, std::slice::from_ref(&item))
@@ -179,12 +183,15 @@ pub(crate) fn last_assistant_message_from_item(item: &ResponseItem) -> Option<St
 
 pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Option<ResponseItem> {
     match input {
-        ResponseInputItem::FunctionCallOutput { call_id, output } => {
-            Some(ResponseItem::FunctionCallOutput {
-                call_id: call_id.clone(),
-                output: output.clone(),
-            })
-        }
+        ResponseInputItem::FunctionCallOutput {
+            call_id,
+            output,
+            output_metadata,
+        } => Some(ResponseItem::FunctionCallOutput {
+            call_id: call_id.clone(),
+            output: output.clone(),
+            output_metadata: output_metadata.clone().or_else(|| output.metadata()),
+        }),
         ResponseInputItem::CustomToolCallOutput { call_id, output } => {
             Some(ResponseItem::CustomToolCallOutput {
                 call_id: call_id.clone(),
@@ -200,8 +207,10 @@ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Opti
                     ..Default::default()
                 },
             };
+            let output_metadata = output.metadata();
             Some(ResponseItem::FunctionCallOutput {
                 call_id: call_id.clone(),
+                output_metadata,
                 output,
             })
         }

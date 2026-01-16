@@ -97,13 +97,15 @@ impl ToolOutput {
                         output: content,
                     }
                 } else {
+                    let output = FunctionCallOutputPayload {
+                        content,
+                        content_items,
+                        success,
+                    };
                     ResponseInputItem::FunctionCallOutput {
                         call_id: call_id.to_string(),
-                        output: FunctionCallOutputPayload {
-                            content,
-                            content_items,
-                            success,
-                        },
+                        output_metadata: output.metadata(),
+                        output,
                     }
                 }
             }
@@ -194,7 +196,9 @@ mod tests {
         .into_response("fn-1", &payload);
 
         match response {
-            ResponseInputItem::FunctionCallOutput { call_id, output } => {
+            ResponseInputItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 assert_eq!(call_id, "fn-1");
                 assert_eq!(output.content, "ok");
                 assert!(output.content_items.is_none());

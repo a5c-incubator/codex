@@ -15,14 +15,14 @@ use crate::state::SessionServices;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
+use futures::Future;
+use futures::future::BoxFuture;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::path::Path;
-
-use futures::Future;
-use futures::future::BoxFuture;
-use serde::Serialize;
+use std::sync::Arc;
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct ApprovalStore {
@@ -235,11 +235,44 @@ pub(crate) trait Sandboxable {
     }
 }
 
-pub(crate) struct ToolCtx<'a> {
-    pub session: &'a Session,
-    pub turn: &'a TurnContext,
+pub(crate) struct ToolCtx {
+    pub session: Arc<Session>,
+    pub turn: Arc<TurnContext>,
     pub call_id: String,
     pub tool_name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HookSignal {
+    pub success: Option<bool>,
+    pub stdout_snippet: Option<String>,
+    pub stderr_snippet: Option<String>,
+}
+
+impl HookSignal {
+    pub fn pending() -> Self {
+        Self {
+            success: None,
+            stdout_snippet: None,
+            stderr_snippet: None,
+        }
+    }
+
+    pub fn success(stdout_snippet: Option<String>) -> Self {
+        Self {
+            success: Some(true),
+            stdout_snippet,
+            stderr_snippet: None,
+        }
+    }
+
+    pub fn failure(stderr_snippet: Option<String>) -> Self {
+        Self {
+            success: Some(false),
+            stdout_snippet: None,
+            stderr_snippet,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +288,14 @@ pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<Out, ToolError>;
+
+    fn hook_signal_for_output(&self, _req: &Req, _out: &Out) -> HookSignal {
+        HookSignal::success(None)
+    }
+
+    fn hook_signal_for_error(&self, _req: &Req, err: &ToolError) -> HookSignal {
+        HookSignal::failure(Some(format!("{err:?}")))
+    }
 }
 
 pub(crate) struct SandboxAttempt<'a> {

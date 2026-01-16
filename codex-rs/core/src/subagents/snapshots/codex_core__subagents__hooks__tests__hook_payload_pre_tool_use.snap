@@ -1,0 +1,15 @@
+---
+source: core/src/subagents/hooks.rs
+expression: json
+---
+{
+  "phase": "pre_tool_use",
+  "manifest_id": "docs-demo",
+  "tool_name": "shell",
+  "call_id": "call-PreToolUse",
+  "session_source": "cli",
+  "sandbox_policy": {
+    "type": "danger-full-access"
+  },
+  "approval_policy": "never"
+}

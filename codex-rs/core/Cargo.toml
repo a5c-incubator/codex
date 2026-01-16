@@ -29,6 +29,7 @@ codex-execpolicy = { workspace = true }
 codex-file-search = { workspace = true }
 codex-git = { workspace = true }
 codex-keyring-store = { workspace = true }
+codex-subagent = { workspace = true }
 codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 codex-rmcp-client = { workspace = true }
@@ -43,6 +44,7 @@ encoding_rs = { workspace = true }
 env-flags = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
+globset = { workspace = true }
 http = { workspace = true }
 include_dir = { workspace = true }
 indexmap = { workspace = true }
@@ -124,10 +126,12 @@ assert_matches = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-core = { path = ".", default-features = false, features = ["deterministic_process_ids"] }
 codex-otel = { workspace = true, features = ["disable-default-metrics-exporter"] }
+codex-subagent = { workspace = true, features = ["test-support"] }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
 ctor = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png"] }
+insta = { workspace = true, features = ["json"] }
 maplit = { workspace = true }
 predicates = { workspace = true }
 pretty_assertions = { workspace = true }

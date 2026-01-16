@@ -1679,6 +1679,7 @@ impl App {
                                         model: None,
                                         effort: None,
                                         summary: None,
+                                        subagent: None,
                                     },
                                 ));
                                 self.app_event_tx

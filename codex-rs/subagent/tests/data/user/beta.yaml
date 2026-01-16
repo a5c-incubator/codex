@@ -1,0 +1,21 @@
+id: beta
+name: Beta Reviewer
+description: Reviews code changes
+permissionMode: acceptEdits
+body: |
+  Stay focused on review quality.
+tools:
+  - git
+  - diff
+hooks:
+  pre:
+    - name: capture
+      command: ./capture.sh
+      tools:
+        - git
+triggers:
+  - type: glob
+    pattern: review-*
+    weight: 5
+skills:
+  - review

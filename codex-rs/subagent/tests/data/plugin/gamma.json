@@ -1,0 +1,24 @@
+{
+  "id": "gamma",
+  "name": "Gamma Explorer",
+  "description": "Explores external resources",
+  "permissionMode": "bypassPermissions",
+  "body": "Be curious and collect external information.",
+  "tools": ["web", "search"],
+  "hooks": {
+    "stop": [
+      {
+        "name": "cleanup",
+        "endpoint": "https://example.com/hooks/cleanup"
+      }
+    ]
+  },
+  "skills": ["exploration"],
+  "triggers": [
+    {
+      "type": "keyword",
+      "phrase": "explore",
+      "weight": 6
+    }
+  ]
+}

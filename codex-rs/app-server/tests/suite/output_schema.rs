@@ -88,6 +88,7 @@ async fn send_user_turn_accepts_output_schema_v1() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: Some(output_schema.clone()),
+            subagent: None,
         })
         .await?;
     let _send_turn_resp: SendUserTurnResponse = to_response::<SendUserTurnResponse>(
@@ -189,6 +190,7 @@ async fn send_user_turn_output_schema_is_per_turn_v1() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: Some(output_schema.clone()),
+            subagent: None,
         })
         .await?;
     let _send_turn_resp: SendUserTurnResponse = to_response::<SendUserTurnResponse>(
@@ -236,6 +238,7 @@ async fn send_user_turn_output_schema_is_per_turn_v1() -> Result<()> {
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
             output_schema: None,
+            subagent: None,
         })
         .await?;
     let _send_turn_resp_2: SendUserTurnResponse = to_response::<SendUserTurnResponse>(

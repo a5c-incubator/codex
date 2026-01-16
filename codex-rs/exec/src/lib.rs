@@ -9,17 +9,22 @@ mod event_processor;
 mod event_processor_with_human_output;
 pub mod event_processor_with_jsonl_output;
 pub mod exec_events;
+pub mod subagent_args;
 
+use anyhow::Context;
 pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
 use codex_common::oss::ensure_oss_provider_ready;
 use codex_common::oss::get_default_model_for_oss_provider;
 use codex_core::AuthManager;
+use codex_core::CodexThread;
 use codex_core::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_core::NewThread;
 use codex_core::OLLAMA_OSS_PROVIDER_ID;
 use codex_core::ThreadManager;
+use codex_core::agent::AgentRegistry;
+use codex_core::agent::RefreshInvocation;
 use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -34,6 +39,10 @@ use codex_core::protocol::Op;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SessionSource;
+use codex_core::protocol::SubagentOverride;
+use codex_core::protocol::SubagentOverrideOrigin;
+use codex_core::protocol::SubagentResume;
+use codex_protocol::ThreadId;
 use codex_protocol::approvals::ElicitationAction;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::user_input::UserInput;
@@ -41,19 +50,26 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use serde_json::Value;
+use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use supports_color::Stream;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 use crate::cli::Command as ExecCommand;
+use crate::cli::ResumeArgs;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
+use crate::subagent_args::SubagentOverrideInput;
+use crate::subagent_args::parse_subagent_overrides;
 use codex_core::default_client::set_default_originator;
 use codex_core::find_thread_path_by_id_str;
 
@@ -91,7 +107,35 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         prompt,
         output_schema: output_schema_path,
         config_overrides,
+        use_subagent,
+        cli_manifest,
+        cli_manifest_file,
+        plugin_dirs,
     } = cli;
+
+    let discovery_overrides = parse_subagent_overrides(&SubagentOverrideInput {
+        cli_manifests: &cli_manifest,
+        cli_manifest_files: &cli_manifest_file,
+        plugin_dirs: &plugin_dirs,
+    })?;
+    let cli_override_count = discovery_overrides.cli_manifests.len();
+    let plugin_override_count = discovery_overrides.plugin_dirs.len();
+    debug!(
+        cli_manifest_overrides = cli_override_count,
+        plugin_manifest_dirs = plugin_override_count,
+        "parsed CLI subagent overrides"
+    );
+    let subagent_discovery_overrides = if discovery_overrides.is_empty() {
+        None
+    } else {
+        Some(discovery_overrides)
+    };
+
+    let mut pending_agent_resume_token = if let Some(ExecCommand::Resume(args)) = command.as_ref() {
+        resolve_agent_resume_token(args)?
+    } else {
+        None
+    };
 
     let (stdout_with_ansi, stderr_with_ansi) = match color {
         cli::Color::Always => (true, true),
@@ -212,11 +256,16 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         include_apply_patch_tool: None,
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
+        subagent_discovery_overrides,
         additional_writable_roots: add_dir,
     };
 
     let config =
         Config::load_with_cli_overrides_and_harness_overrides(cli_kv_overrides, overrides).await?;
+
+    if let Some(agent_id) = use_subagent.as_deref() {
+        ensure_subagent_available(agent_id, &config.cwd)?;
+    }
 
     if let Err(err) = enforce_login_restrictions(&config) {
         eprintln!("{err}");
@@ -298,7 +347,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     // Handle resume subcommand by resolving a rollout path and using explicit resume API.
     let NewThread {
-        thread_id: _,
+        thread_id,
         thread,
         session_configured,
     } = if let Some(ExecCommand::Resume(args)) = command.as_ref() {
@@ -314,6 +363,17 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     } else {
         thread_manager.start_thread(config.clone()).await?
     };
+
+    let mut subagent_active = false;
+    if let Some(agent_id) = use_subagent.clone() {
+        let resume_token = pending_agent_resume_token.take();
+        activate_subagent_runtime(&thread_id, &thread, &agent_id, resume_token).await?;
+        subagent_active = true;
+    } else if let Some(token) = pending_agent_resume_token.take() {
+        warn!(
+            "Ignoring provided agent resume token because no --use-subagent value was supplied: {token:?}"
+        );
+    }
     let (initial_operation, prompt_summary) = match (command, prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
             let review_request = build_review_request(review_cli)?;
@@ -464,12 +524,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         match shutdown {
             CodexStatus::Running => continue,
             CodexStatus::InitiateShutdown => {
+                if subagent_active {
+                    clear_subagent_runtime(&thread_id, &thread).await?;
+                    subagent_active = false;
+                }
                 thread.submit(Op::Shutdown).await?;
             }
             CodexStatus::Shutdown => {
+                if subagent_active {
+                    clear_subagent_runtime(&thread_id, &thread).await?;
+                    subagent_active = false;
+                }
                 break;
             }
         }
+    }
+    if subagent_active {
+        clear_subagent_runtime(&thread_id, &thread).await?;
     }
     event_processor.print_final_output();
     if error_seen {
@@ -533,6 +604,148 @@ fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {
             std::process::exit(1);
         }
     }
+}
+
+fn resolve_agent_resume_token(args: &ResumeArgs) -> anyhow::Result<Option<String>> {
+    if let Some(token) = &args.agent_resume_token {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("--agent-resume-token cannot be empty");
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    if let Some(path) = &args.agent_resume_token_file {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read resume token file {}", path.display()))?;
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!(
+                "resume token file {} does not contain a token",
+                path.display()
+            );
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    Ok(None)
+}
+
+fn ensure_subagent_available(agent_id: &str, cwd: &Path) -> anyhow::Result<()> {
+    let registry = AgentRegistry::load_from_default_targets_with_telemetry(
+        cwd,
+        None,
+        RefreshInvocation::EnsureAvailable,
+    )
+    .with_context(|| format!("failed to load subagent manifests from {}", cwd.display()))?;
+    if registry.has_agent(agent_id) {
+        return Ok(());
+    }
+    let project_dir = cwd.join(".claude").join("agents");
+    anyhow::bail!(
+        "unknown subagent `{agent_id}`. Create a manifest under {} or ~/.claude/agents",
+        project_dir.display()
+    );
+}
+
+async fn activate_subagent_runtime(
+    thread_id: &ThreadId,
+    thread: &Arc<CodexThread>,
+    agent_id: &str,
+    resume_token: Option<String>,
+) -> anyhow::Result<()> {
+    send_subagent_override(
+        thread_id,
+        thread,
+        SubagentOverride::Activate {
+            id: agent_id.to_string(),
+            resume: resume_token.map(|token| SubagentResume { token }),
+            origin: Some(SubagentOverrideOrigin::ExecFlag),
+        },
+    )
+    .await
+}
+
+async fn clear_subagent_runtime(
+    thread_id: &ThreadId,
+    thread: &Arc<CodexThread>,
+) -> anyhow::Result<()> {
+    send_subagent_override(
+        thread_id,
+        thread,
+        SubagentOverride::Clear {
+            origin: Some(SubagentOverrideOrigin::ExecFlag),
+        },
+    )
+    .await
+}
+
+async fn send_subagent_override(
+    thread_id: &ThreadId,
+    thread: &Arc<CodexThread>,
+    subagent: SubagentOverride,
+) -> anyhow::Result<()> {
+    let (action, agent_id, origin) = match &subagent {
+        SubagentOverride::Activate { id, origin, .. } => ("activate", Some(id.clone()), *origin),
+        SubagentOverride::Clear { origin } => ("clear", None, *origin),
+    };
+    let submit_result = thread
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            model: None,
+            effort: None,
+            summary: None,
+            subagent: Some(subagent),
+        })
+        .await;
+    match submit_result {
+        Ok(_) => {
+            log_subagent_override_result(
+                thread_id,
+                action,
+                agent_id.as_deref(),
+                origin,
+                "success",
+                None,
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let message = err.to_string();
+            log_subagent_override_result(
+                thread_id,
+                action,
+                agent_id.as_deref(),
+                origin,
+                "error",
+                Some(message.as_str()),
+            );
+            Err(err.into())
+        }
+    }
+}
+
+fn log_subagent_override_result(
+    thread_id: &ThreadId,
+    action: &str,
+    agent_id: Option<&str>,
+    origin: Option<SubagentOverrideOrigin>,
+    status: &str,
+    error: Option<&str>,
+) {
+    let origin_label = origin
+        .unwrap_or(SubagentOverrideOrigin::Unknown)
+        .to_string();
+    tracing::event!(
+        tracing::Level::INFO,
+        event.name = "codex.subagent_client_switch",
+        session.id = %thread_id,
+        origin = origin_label.as_str(),
+        action = action,
+        agent.id = agent_id,
+        status = status,
+        error.message = error,
+    );
 }
 
 fn resolve_prompt(prompt_arg: Option<String>) -> String {

@@ -211,7 +211,8 @@ async fn shell_command_times_out_with_timeout_ms() -> anyhow::Result<()> {
     let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
     let call_id = "shell-command-timeout";
     let command = if cfg!(windows) {
-        "timeout /t 5"
+        // Prefer PowerShell sleep because GNU coreutils can shadow `timeout /t` on Git Bash/MSYS.
+        r#"powershell -NoLogo -NonInteractive -Command "Start-Sleep -Seconds 5""#
     } else {
         "sleep 5"
     };

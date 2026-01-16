@@ -1,0 +1,47 @@
+﻿[package]
+name = "codex-subagent"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Claude-compatible subagent scaffolding for Codex."
+
+[lints]
+workspace = true
+
+[features]
+default = ["manifest-schema", "schema", "loader"]
+manifest-schema = ["dep:schemars"]
+schema = ["manifest-schema"]
+loader = [
+    "schema",
+    "dep:walkdir",
+    "dep:notify",
+    "dep:async-channel",
+    "dep:async-stream",
+    "dep:futures",
+    "dep:tracing",
+]
+test-support = []
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+schemars = { workspace = true, optional = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true, optional = true }
+dirs = { workspace = true }
+async-channel = { workspace = true, optional = true }
+async-stream = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+dunce = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["json", "serde"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
