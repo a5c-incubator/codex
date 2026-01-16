@@ -231,7 +231,7 @@ async fn run_command_hook(
 ) -> HookOutcome {
     let session = invocation.session;
     let turn = invocation.turn;
-    let command_args = session.user_shell().derive_exec_args(command, false);
+    let command_args = derive_hook_command_args(&session, command);
 
     let manager = &session.services.unified_exec_manager;
     let process_id = manager.allocate_process_id().await;
@@ -322,6 +322,23 @@ async fn run_http_hook(
             HookOutcome::failed(phase, hook, err.to_string())
         }
     }
+}
+
+fn derive_hook_command_args(session: &Session, command: &str) -> Vec<String> {
+    if cfg!(windows) && command_requires_bash(command) {
+        return vec!["bash".to_string(), "-lc".to_string(), command.to_string()];
+    }
+    session.user_shell().derive_exec_args(command, false)
+}
+
+fn command_requires_bash(command: &str) -> bool {
+    let Some(first) = command.split_whitespace().next() else {
+        return false;
+    };
+    if matches!(first, "bash" | "sh") {
+        return false;
+    }
+    (first.starts_with("./") || first.starts_with(".\\")) && first.ends_with(".sh")
 }
 
 #[derive(Clone, Debug, Serialize)]
