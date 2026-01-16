@@ -452,6 +452,73 @@ async fn built_in_subagents_activate_without_manifests() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejects_nested_subagent_activation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = core_test_support::responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_session_source(SessionSource::SubAgent(SubAgentSource::Other(
+            "delegate-alpha".to_string(),
+        )))
+        .with_config(|config| {
+            write_manifest(
+                &config.cwd,
+                TOOL_GATING_AGENT,
+                r#"
+id: gate-agent
+name: Tool Gate
+description: Blocks shell invocations
+permissionMode: default
+tools:
+  - read_file
+hooks:
+  pre: []
+  post: []
+  stop: []
+body: |
+  Keep responses short.
+"#
+                .to_string(),
+            );
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            model: None,
+            effort: None,
+            summary: None,
+            subagent: Some(SubagentOverride::Activate {
+                id: TOOL_GATING_AGENT.to_string(),
+                resume: None,
+                origin: None,
+            }),
+        })
+        .await?;
+
+    let event = wait_for_event(
+        &test.codex,
+        |ev| matches!(ev, EventMsg::Error(err) if err.message.contains("cannot activate subagent")),
+    )
+    .await;
+    match event {
+        EventMsg::Error(error) => {
+            assert!(
+                error.message.contains("delegate-alpha"),
+                "error should mention subagent session source: {}",
+                error.message
+            );
+        }
+        other => panic!("expected Error event, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subagent_hooks_fire_and_stop_on_clear() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

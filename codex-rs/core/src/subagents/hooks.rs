@@ -131,6 +131,10 @@ pub async fn run_subagent_hooks(
     invocation: &HookInvocation,
     signal: &HookSignal,
 ) -> Vec<HookOutcome> {
+    if is_hook_call_id(&invocation.call_id) {
+        // Avoid recursion when hook commands trigger tool executions.
+        return Vec::new();
+    }
     let Some(runtime) = invocation.turn.active_subagent().cloned() else {
         return Vec::new();
     };
@@ -176,6 +180,15 @@ pub async fn run_subagent_hooks(
         outcomes.push(outcome);
     }
     outcomes
+}
+
+fn is_hook_call_id(call_id: &str) -> bool {
+    matches!(
+        call_id,
+        id if id.starts_with("hook-PreToolUse-")
+            || id.starts_with("hook-PostToolUse-")
+            || id.starts_with("hook-Stop-")
+    )
 }
 
 fn should_run_hook(hook: &Hook, tool_name: Option<&str>) -> bool {

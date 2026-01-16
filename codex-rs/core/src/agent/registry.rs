@@ -1098,7 +1098,11 @@ mod tests {
         let mut registry = AgentRegistry::new(loader);
         registry.refresh(&[])?;
 
-        let tools = vec!["read".to_string(), "apply_patch".to_string()];
+        let tools = vec![
+            "read".to_string(),
+            "search".to_string(),
+            "apply_patch".to_string(),
+        ];
         let ctx = ActivationContext::new("parent-model", AskForApproval::OnRequest, &tools);
 
         let profile = registry.activate("alpha", &ctx).expect("runtime profile");

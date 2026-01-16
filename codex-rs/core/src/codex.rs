@@ -545,6 +545,9 @@ impl Session {
     }
 
     async fn ensure_subagents_registered(&self, client: &ModelClient) {
+        if matches!(client.session_source(), SessionSource::SubAgent(_)) {
+            return;
+        }
         if self
             .agent_registration_done
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2183,8 +2186,32 @@ mod handlers {
                 }
                 Ok(())
             }
-            SubagentOverride::Activate { id, resume, origin } => {
-                if is_subagent_active(sess, &id).await {
+            SubagentOverride::Activate {
+                ref id,
+                resume,
+                origin,
+            } => {
+                let session_source = current_session_source(sess).await;
+                if matches!(session_source, SessionSource::SubAgent(_)) {
+                    let message = format!(
+                        "Cannot activate subagent `{id}` while running inside {session_source}."
+                    );
+                    emit_subagent_switch_event(
+                        sess,
+                        SubagentSwitchAction::Activate,
+                        Some(id.as_str()),
+                        None,
+                        origin,
+                        SubagentSwitchStatus::Error,
+                        Some(message.as_str()),
+                    )
+                    .await;
+                    return Err(ActivationError::UnsupportedSessionSource {
+                        agent_id: id.clone(),
+                        session_source,
+                    });
+                }
+                if is_subagent_active(sess, id).await {
                     emit_subagent_switch_event(
                         sess,
                         SubagentSwitchAction::Activate,
@@ -2197,7 +2224,7 @@ mod handlers {
                     .await;
                     return Ok(());
                 }
-                if let Err(err) = ensure_agent_known(sess, &id).await {
+                if let Err(err) = ensure_agent_known(sess, id).await {
                     let message = err.to_string();
                     emit_subagent_switch_event(
                         sess,
@@ -2212,7 +2239,7 @@ mod handlers {
                     return Err(err);
                 }
                 clear_active_subagent_with_hooks(sess, sub_id, "switch").await;
-                match sess.activate_subagent(&id, resume.map(|r| r.token)).await {
+                match sess.activate_subagent(id, resume.map(|r| r.token)).await {
                     Ok(runtime) => {
                         let snapshot = sess.services.active_subagent().await;
                         emit_subagent_lifecycle_event(
@@ -2358,10 +2385,7 @@ mod handlers {
         status: SubagentSwitchStatus,
         error: Option<&str>,
     ) {
-        let session_source = {
-            let state = sess.state.lock().await;
-            state.session_configuration.session_source.clone()
-        };
+        let session_source = current_session_source(sess).await;
         let scope_label = scope
             .map(crate::agent::registry::telemetry_scope_label)
             .map(String::from);
@@ -2545,6 +2569,14 @@ mod handlers {
     }
 
     async fn auto_delegate_if_needed(sess: &Arc<Session>, sub_id: &str, items: &[UserInput]) {
+        if !begin_auto_delegate(sess).await {
+            return;
+        }
+        auto_delegate_inner(sess, sub_id, items).await;
+        end_auto_delegate(sess).await;
+    }
+
+    async fn auto_delegate_inner(sess: &Arc<Session>, sub_id: &str, items: &[UserInput]) {
         if sess.services.active_subagent().await.is_some() {
             return;
         }
@@ -2596,10 +2628,28 @@ mod handlers {
         .await;
     }
 
-    async fn session_is_subagent(sess: &Arc<Session>) -> bool {
+    async fn begin_auto_delegate(sess: &Arc<Session>) -> bool {
+        let mut state = sess.state.lock().await;
+        if state.auto_delegate_in_progress {
+            return false;
+        }
+        state.auto_delegate_in_progress = true;
+        true
+    }
+
+    async fn end_auto_delegate(sess: &Arc<Session>) {
+        let mut state = sess.state.lock().await;
+        state.auto_delegate_in_progress = false;
+    }
+
+    async fn current_session_source(sess: &Arc<Session>) -> SessionSource {
         let state = sess.state.lock().await;
+        state.session_configuration.session_source.clone()
+    }
+
+    async fn session_is_subagent(sess: &Arc<Session>) -> bool {
         matches!(
-            state.session_configuration.session_source,
+            current_session_source(sess).await,
             SessionSource::SubAgent(_)
         )
     }

@@ -16,6 +16,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol::SessionConfiguredEvent;
+use codex_core::protocol::SessionSource;
 use codex_core::util::disable_tool_error_panics;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::user_input::UserInput;
@@ -56,6 +57,7 @@ pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
     auth: CodexAuth,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
+    session_source: SessionSource,
 }
 
 impl TestCodexBuilder {
@@ -84,6 +86,11 @@ impl TestCodexBuilder {
         F: FnOnce(&Path) + Send + 'static,
     {
         self.pre_build_hooks.push(Box::new(hook));
+        self
+    }
+
+    pub fn with_session_source(mut self, session_source: SessionSource) -> Self {
+        self.session_source = session_source;
         self
     }
 
@@ -141,10 +148,11 @@ impl TestCodexBuilder {
     ) -> anyhow::Result<TestCodex> {
         disable_tool_error_panics();
         let auth = self.auth.clone();
-        let thread_manager = ThreadManager::with_models_provider_and_home(
+        let thread_manager = ThreadManager::with_models_provider_home_and_source(
             auth.clone(),
             config.model_provider.clone(),
             config.codex_home.clone(),
+            self.session_source.clone(),
         );
         let thread_manager = Arc::new(thread_manager);
 
@@ -423,5 +431,6 @@ pub fn test_codex() -> TestCodexBuilder {
         config_mutators: vec![],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],
+        session_source: SessionSource::Exec,
     }
 }

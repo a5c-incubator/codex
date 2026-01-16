@@ -108,6 +108,10 @@ impl ModelClient {
         })
     }
 
+    pub fn session_source(&self) -> &SessionSource {
+        &self.session_source
+    }
+
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config)
     }

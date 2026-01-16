@@ -141,6 +141,11 @@ impl<'a> ActivationContext<'a> {
 pub enum ActivationError {
     #[error("unknown subagent `{agent_id}`")]
     UnknownAgent { agent_id: String },
+    #[error("cannot activate subagent `{agent_id}` while running in {session_source}")]
+    UnsupportedSessionSource {
+        agent_id: String,
+        session_source: SessionSource,
+    },
 }
 
 #[derive(Default, Debug, Clone, Copy)]
